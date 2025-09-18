@@ -78,22 +78,34 @@
     if (!extAlive()) return;
     if (m?.type==='MAP_MODE') toggle(!!m.on, m.section||'PLAN');
     if (m?.type === 'INSERT_TEXT') {
-      const el = document.activeElement as any;
+      const el = document.activeElement;
       if (!el) return;
-      if (el?.isContentEditable) {
-        try { document.execCommand('insertText', false, m.text); } catch {}
+      // Handle contentEditable elements safely
+      if (el.isContentEditable) {
+        try {
+          document.execCommand('insertText', false, m.text);
+        } catch (err) {
+          // Optional: log error for debugging
+          // console.warn('insertText failed:', err);
+        }
         return;
       }
-      if (typeof el?.value === 'string') {
+      // Handle text input and textarea elements robustly
+      if (
+        (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search' || el.type === 'email' || el.type === 'url' || el.type === 'password')) ||
+        el.tagName === 'TEXTAREA'
+      ) {
         const start = el.selectionStart ?? el.value.length;
         const end = el.selectionEnd ?? el.value.length;
-        const value = el.value;
-        const next = value.slice(0, start) + String(m.text ?? '') + value.slice(end);
-        el.value = next;
-        const pos = start + String(m.text ?? '').length;
+        const insert = String(m.text ?? '');
+        el.value = el.value.slice(0, start) + insert + el.value.slice(end);
+        const pos = start + insert.length;
         try {
           el.selectionStart = el.selectionEnd = pos;
-        } catch {}
+        } catch (err) {
+          // Optional: log error for debugging
+          // console.warn('Selection update failed:', err);
+        }
         el.dispatchEvent(new Event('input', { bubbles: true }));
       }
     }
