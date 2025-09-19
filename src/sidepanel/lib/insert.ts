@@ -91,8 +91,18 @@ async function resolveTargetTabId(mapping?: FieldMapping): Promise<number | null
   if ((!candidates || candidates.length === 0) && mapping.popupTitleIncludes) {
     candidates = tabs.filter((t) => (t.title || '').toLowerCase().includes(mapping.popupTitleIncludes!.toLowerCase()));
   }
-  const tab = candidates && candidates.length ? candidates[0] : null;
-  return tab?.id ?? null;
+  // Prefer the most recently active candidate (descending by lastAccessed when available)
+  const tab = (candidates && candidates.length)
+    ? candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
+    : null;
+  if (!tab?.id) return null;
+  try {
+    await chrome.tabs.update(tab.id, { active: true });
+    if (tab.windowId !== undefined) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+  } catch {}
+  return tab.id;
 }
 
 export async function insertUsingMapping(mapping: FieldMapping, text: string): Promise<Strategy | 'fail'> {

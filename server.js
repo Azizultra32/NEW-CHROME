@@ -18,6 +18,19 @@ app.post('/v1/encounters/:id/presign', (req, res) => {
   res.json({ wssUrl: 'ws://localhost:8080/asr', headers: {} });
 });
 
+// Minimal audit endpoint for local testing
+// POST /v1/audit { type, encounterId, fp, ts }
+app.post('/v1/audit', (req, res) => {
+  try {
+    const { type, encounterId, fp, extra } = req.body || {};
+    console.log('[AUDIT]', new Date().toISOString(), type, encounterId, fp, extra || '');
+    return res.json({ ok: true });
+  } catch (e) {
+    console.warn('[AUDIT][ERR]', e);
+    return res.status(500).json({ ok: false });
+  }
+});
+
 const server = app.listen(8080, () => {
   console.log('ASR mock listening on http://localhost:8080');
 });

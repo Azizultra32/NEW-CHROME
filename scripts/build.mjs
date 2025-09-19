@@ -54,6 +54,12 @@ async function copyStatic() {
   try {
     await cp(join(root, 'public', 'worklet.js'), join(distDir, 'worklet.js'));
   } catch {}
+  try {
+    await cp(join(root, 'public', 'ehr-test.html'), join(distDir, 'ehr-test.html'));
+  } catch {}
+  try {
+    await cp(join(root, 'public', 'ehr-popup.html'), join(distDir, 'ehr-popup.html'));
+  } catch {}
 }
 
 async function injectPanelHtml() {

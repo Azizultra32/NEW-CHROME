@@ -61,6 +61,17 @@ function AppInner() {
     setWsEvents((prev) => [msg, ...prev].slice(0, 5));
   };
 
+  // Local audit helper (mock server)
+  const audit = useCallback(async (type: string, extra?: any) => {
+    try {
+      const base = apiBase || 'http://localhost:8080';
+      await fetch(`${base}/v1/audit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, ts: Date.now(), extra })
+      }).catch(() => {});
+    } catch {}
+  }, [apiBase]);
+
   const recordingRef = useRef(recording);
   const busyRef = useRef(busy);
   const onToggleRef = useRef(onToggleRecord);
@@ -116,6 +127,7 @@ function AppInner() {
           toast.push('Confirm patient before inserting');
           setLastError('Confirm patient before inserting');
           pushWsEvent('guard: insert blocked');
+          audit('insert_blocked', { reason: guard.reason });
           return;
         }
         toast.push('Patient guard error. Try again.');
@@ -152,6 +164,7 @@ function AppInner() {
       : await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
     toast.push(`Insert via ${strategy}`);
     pushWsEvent('audit: plan inserted');
+    audit('insert_ok', { strategy });
     setLastError(null);
   }
 
@@ -465,6 +478,43 @@ function AppInner() {
       toast.push('Failed to save API base');
     }
   }, [apiBase, toast]);
+
+  // Load API base on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const { API_BASE } = await chrome.storage.local.get(['API_BASE']);
+        if (API_BASE) setApiBase(API_BASE);
+      } catch {}
+    })();
+  }, []);
+
+  // Mapping export/import (per hostname)
+  const onExportMappings = useCallback(async () => {
+    if (!host) { toast.push('No host detected'); return; }
+    try {
+      const data = await loadProfile(host);
+      const blob = new Blob([JSON.stringify({ host, profile: data }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `assistmd-mapping-${host}.json`; a.click();
+      URL.revokeObjectURL(url);
+      toast.push('Mappings exported');
+    } catch { toast.push('Export failed'); }
+  }, [host, toast]);
+
+  const onImportMappings = useCallback(async (file: File) => {
+    if (!host) { toast.push('No host detected'); return; }
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text || '{}');
+      const profileIn = parsed?.profile || parsed;
+      if (!profileIn || typeof profileIn !== 'object') { toast.push('Invalid mapping file'); return; }
+      await saveProfile(host, profileIn);
+      setProfile(profileIn);
+      toast.push('Mappings imported');
+    } catch { toast.push('Import failed'); }
+  }, [host, toast]);
 
   // Keyboard toggle for focus
   useEffect(() => {
@@ -865,6 +915,20 @@ ${section.join(' ')}`;
                   >
                     Save
                   </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={onExportMappings}
+                  >
+                    Export Mappings
+                  </button>
+                  <label className="px-2 py-1 text-xs rounded-md border border-slate-300 cursor-pointer">
+                    Import
+                    <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onImportMappings(f);
+                      e.currentTarget.value = '';
+                    }} />
+                  </label>
                   <button
                     className="px-2 py-1 text-xs rounded-md border border-slate-300"
                     onClick={() => setSettingsOpen(false)}
