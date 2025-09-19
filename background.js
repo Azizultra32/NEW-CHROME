@@ -18,7 +18,7 @@ async function ensureOffscreen() {
   console.log(`[${TAG}] creating offscreen document`);
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
-    reasons: ['AUDIO_CAPTURE'],
+    reasons: ['USER_MEDIA'],
     justification: 'Low-latency mic capture for clinical dictation'
   });
 }

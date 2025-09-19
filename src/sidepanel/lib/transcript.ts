@@ -32,6 +32,12 @@ class TranscriptStore {
     }
     this.emit();
   }
+  addBoundary(label: string) {
+    const id = Math.random().toString(36).slice(2);
+    this.items.push({ id, text: `[boundary] ${label}` });
+    if (this.items.length > 500) this.items.shift();
+    this.emit();
+  }
   clear() { 
     this.items = []; 
     this.recentTexts.clear();

@@ -91,7 +91,6 @@ async function resolveTargetTabId(mapping?: FieldMapping): Promise<number | null
   if ((!candidates || candidates.length === 0) && mapping.popupTitleIncludes) {
     candidates = tabs.filter((t) => (t.title || '').toLowerCase().includes(mapping.popupTitleIncludes!.toLowerCase()));
   }
-  // Heuristic: pick most recently active tab among candidates
   const tab = candidates && candidates.length ? candidates[0] : null;
   return tab?.id ?? null;
 }
@@ -99,14 +98,13 @@ async function resolveTargetTabId(mapping?: FieldMapping): Promise<number | null
 export async function insertUsingMapping(mapping: FieldMapping, text: string): Promise<Strategy | 'fail'> {
   const tabId = await resolveTargetTabId(mapping);
   if (!tabId) return 'fail';
-  // Reuse insertTextInto by temporarily querying the right tab and executing there
   const execResult = await chrome.scripting.executeScript({
     target: { tabId },
     func: (sel: string, value: string, path?: number[]) => {
       let w: Window & typeof globalThis = window;
       try {
         if (Array.isArray(path) && path.length) {
-          for (const i of path) { w = w.frames[i] as any; if (!w) break; }
+          for (const i of path) { w = (w.frames[i] as any); if (!w) break; }
         }
       } catch { return 'fail'; }
       const doc = w?.document || document;
@@ -137,7 +135,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
     target: { tabId },
     func: (path?: number[]) => {
       let w: Window & typeof globalThis = window;
-      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = w.frames[i] as any; if (!w) break; } } } catch {}
+      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch {}
       const isMac = (w.navigator?.platform || navigator.platform).toUpperCase().includes('MAC');
       const ev = new (w as any).KeyboardEvent('keydown', { key: 'v', metaKey: isMac, ctrlKey: !isMac, bubbles: true });
       try { (w.document?.activeElement as any)?.dispatchEvent(ev); } catch {}
@@ -146,4 +144,26 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
   }).catch(() => {});
 
   return 'clipboard';
+}
+
+export type VerifyResult = { ok: true } | { ok: false; reason: 'missing' | 'not_editable' };
+
+export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult> {
+  const tabId = await resolveTargetTabId(mapping);
+  if (!tabId) return { ok: false, reason: 'missing' };
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel: string, path?: number[]) => {
+      let w: Window & typeof globalThis = window;
+      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return { ok: false, reason: 'missing' } as any; }
+      const doc = w?.document || document;
+      const el = (doc.querySelector(sel) as any) || null;
+      if (!el) return { ok: false, reason: 'missing' } as any;
+      const editable = !!(el.isContentEditable || 'value' in el);
+      return editable ? ({ ok: true } as any) : ({ ok: false, reason: 'not_editable' } as any);
+    },
+    args: [mapping.selector, mapping.framePath]
+  }).catch(() => null);
+  const out = (res && res[0] && res[0].result) as VerifyResult | undefined;
+  return out || { ok: false, reason: 'missing' };
 }

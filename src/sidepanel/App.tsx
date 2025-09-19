@@ -9,7 +9,7 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping } from './lib/insert';
+import { insertTextInto, insertUsingMapping, verifyTarget } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
@@ -40,6 +40,7 @@ function AppInner() {
   const [commandMessage, setCommandMessage] = useState(BASE_COMMAND_MESSAGE);
   const commandMessageResetRef = useRef<number | null>(null);
   const [pendingGuard, setPendingGuard] = useState<GuardStatus | null>(null);
+  const lastFpRef = useRef<string | null>(null);
   const [liveWords, setLiveWords] = useState('');
 
   const setCommandFeedback = (msg: string, persist = false) => {
@@ -122,15 +123,32 @@ function AppInner() {
         return;
       }
     }
+    // Verify target exists and editable
+    const verify = await verifyTarget({
+      section: 'PLAN',
+      selector: planField.selector,
+      strategy: planField.strategy,
+      verified: planField.verified,
+      framePath: planField.framePath,
+      target: (planField as any).target,
+      popupUrlPattern: (planField as any).popupUrlPattern,
+      popupTitleIncludes: (planField as any).popupTitleIncludes
+    } as any);
+    if (!verify.ok) {
+      const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
+      toast.push(`${reason}. Remap the PLAN field and try again.`);
+      setLastError(reason);
+      return;
+    }
+
     const text = transcript
       .get()
       .filter((x) => !x.text.startsWith('[MOCK]'))
       .map((x) => x.text)
       .join(' ')
       .trim();
-    // If mapping targets a popup, resolve and insert there; else use current tab
-    const strategy = planField.target === 'popup'
-      ? await insertUsingMapping(planField, text || '(empty)')
+    const strategy = (planField as any).target === 'popup'
+      ? await insertUsingMapping(planField as any, text || '(empty)')
       : await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
     toast.push(`Insert via ${strategy}`);
     pushWsEvent('audit: plan inserted');
@@ -765,13 +783,22 @@ ${section.join(' ')}`;
           target,
           popupUrlPattern: target === 'popup' ? urlPattern : undefined,
           popupTitleIncludes: target === 'popup' ? titleIncl : undefined
+<<<<<<< HEAD
         };
+=======
+        } as any;
+>>>>>>> 783eb27 (feat(smart-paste): verify-before-paste with remap guidance; popup-aware insert path; add patient context boundary markers in transcript)
         setProfile(next);
         if (host) saveProfile(host, next);
         toast.push(`Mapped ${m.section} → ${m.selector}`);
       }
       if (m?.type === 'EHR_FP' && m.preview) {
         pushWsEvent(`fp: ${m.preview}`);
+        const fp = String(m.fp || '');
+        if (lastFpRef.current && lastFpRef.current !== fp) {
+          transcript.addBoundary(`patient context changed → ${m.preview}`);
+        }
+        lastFpRef.current = fp || null;
       }
     };
     chrome.runtime.onMessage.addListener(handler);
