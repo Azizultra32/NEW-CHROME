@@ -783,11 +783,7 @@ ${section.join(' ')}`;
           target,
           popupUrlPattern: target === 'popup' ? urlPattern : undefined,
           popupTitleIncludes: target === 'popup' ? titleIncl : undefined
-<<<<<<< HEAD
-        };
-=======
         } as any;
->>>>>>> 783eb27 (feat(smart-paste): verify-before-paste with remap guidance; popup-aware insert path; add patient context boundary markers in transcript)
         setProfile(next);
         if (host) saveProfile(host, next);
         toast.push(`Mapped ${m.section} → ${m.selector}`);
