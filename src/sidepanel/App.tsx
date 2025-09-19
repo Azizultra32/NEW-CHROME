@@ -65,6 +65,7 @@ function AppInner() {
   const onToggleRef = useRef(onToggleRecord);
   const toastRef = useRef(toast);
   const commandCooldownRef = useRef(0);
+  const lastPartialIntentRef = useRef<{ name: string; until: number } | null>(null);
 
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
@@ -125,13 +126,13 @@ function AppInner() {
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const strategy = await insertTextInto(planField.selector, text || '(empty)');
+    const strategy = await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
     toast.push(`Insert via ${strategy}`);
     pushWsEvent('audit: plan inserted');
     setLastError(null);
   }
 
-  const COMMAND_COOLDOWN_MS = 1800;
+  const COMMAND_COOLDOWN_MS = 1000;
 
   // Web Speech result path (hybrid fallback) — parses intent and runs command
   async function handleSRResult(event: any) {
@@ -162,7 +163,10 @@ function AppInner() {
   async function runCommand(intent: ReturnType<typeof parseIntent>) {
     if (!intent) return;
     const now = Date.now();
-    if (now < commandCooldownRef.current) return;
+    if (now < commandCooldownRef.current) {
+      pushWsEvent('command: blocked (cooldown)');
+      return;
+    }
 
     try {
       await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: COMMAND_COOLDOWN_MS });
@@ -703,8 +707,17 @@ ${section.join(' ')}`;
             const tail = low.slice(idx + 'assist '.length).trim();
             const intent = parseIntent('assist ' + tail);
             if (intent) {
-              // Run command and do not add this partial to transcript
-              runCommand(intent);
+              // De-duplicate repeated/overlapping partial triggers of the same intent
+              const now = Date.now();
+              const windowMs = 1800; // lockout window for identical intent names
+              const last = lastPartialIntentRef.current;
+              if (!last || last.name !== intent.name || now >= last.until) {
+                lastPartialIntentRef.current = { name: intent.name, until: now + windowMs };
+                // Run command and do not add this partial to transcript
+                runCommand(intent);
+              } else {
+                pushWsEvent(`command: suppressed duplicate (${intent.name})`);
+              }
               return;
             }
           }
@@ -721,7 +734,8 @@ ${section.join(' ')}`;
           section: m.section,
           selector: m.selector,
           strategy: 'value',
-          verified: false
+          verified: false,
+          framePath: Array.isArray(m.framePath) ? m.framePath : undefined
         };
         setProfile(next);
         if (host) saveProfile(host, next);

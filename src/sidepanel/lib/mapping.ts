@@ -5,6 +5,8 @@ export type FieldMapping = {
   selector: string;
   strategy: Strategy;
   verified: boolean;
+  // For same-origin iframes: index path from top window to target frame
+  framePath?: number[];
   fallbackSelectors?: string[];
 };
 
