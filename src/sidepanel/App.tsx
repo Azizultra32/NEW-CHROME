@@ -18,6 +18,30 @@ const COMMAND_COOLDOWN_MS = 1500;
 let commandCooldownUntil = 0;
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
+type MaybeNodeProcess = { env?: { NODE_ENV?: string } };
+type MaybeImportMetaEnv = ImportMeta & {
+  env?: { MODE?: string; mode?: string; NODE_ENV?: string };
+};
+
+// Runtime-safe detection for dev builds. The panel runs in the browser so `process.env`
+// may be undefined at type-check time; we defensively read through `globalThis` and
+// fall back to build-time env shims when available.
+const isDevelopmentBuild = (() => {
+  const globalProcess = (globalThis as typeof globalThis & { process?: MaybeNodeProcess }).process;
+  const nodeEnv = globalProcess?.env?.NODE_ENV;
+  if (typeof nodeEnv === 'string') {
+    return nodeEnv !== 'production';
+  }
+
+  const metaEnv = (import.meta as MaybeImportMetaEnv).env;
+  const metaMode = metaEnv?.MODE ?? metaEnv?.mode ?? metaEnv?.NODE_ENV;
+  if (typeof metaMode === 'string') {
+    return metaMode !== 'production';
+  }
+
+  return false;
+})();
+
 export default function App() {
   return (
     <ToastProvider>
