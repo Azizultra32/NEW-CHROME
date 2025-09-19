@@ -80,32 +80,20 @@
     if (m?.type === 'INSERT_TEXT') {
       const el = document.activeElement;
       if (!el) return;
-      // Handle contentEditable elements safely
-      if (el.isContentEditable) {
-        try {
-          document.execCommand('insertText', false, m.text);
-        } catch (err) {
-          // Optional: log error for debugging
-          // console.warn('insertText failed:', err);
-        }
+      if (el instanceof HTMLElement && el.isContentEditable) {
+        try { document.execCommand('insertText', false, m.text); } catch {}
         return;
       }
-      // Handle text input and textarea elements robustly
-      if (
-        (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search' || el.type === 'email' || el.type === 'url' || el.type === 'password')) ||
-        el.tagName === 'TEXTAREA'
-      ) {
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
         const start = el.selectionStart ?? el.value.length;
         const end = el.selectionEnd ?? el.value.length;
+        const value = el.value;
         const insert = String(m.text ?? '');
-        el.value = el.value.slice(0, start) + insert + el.value.slice(end);
+        el.value = value.slice(0, start) + insert + value.slice(end);
         const pos = start + insert.length;
         try {
-          el.selectionStart = el.selectionEnd = pos;
-        } catch (err) {
-          // Optional: log error for debugging
-          // console.warn('Selection update failed:', err);
-        }
+          el.setSelectionRange(pos, pos);
+        } catch {}
         el.dispatchEvent(new Event('input', { bubbles: true }));
       }
     }

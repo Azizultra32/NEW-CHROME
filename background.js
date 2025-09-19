@@ -125,6 +125,14 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
       return;
     }
 
+    if (msg?.type === 'COMMAND_WINDOW' && typeof msg.ms === 'number') {
+      if (!msg.forwarded) {
+        chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: msg.ms, forwarded: true }).catch(() => {});
+      }
+      send({ ok: true });
+      return;
+    }
+
     send({ ok: false, error: 'UNKNOWN_MESSAGE' });
   })();
   return true;

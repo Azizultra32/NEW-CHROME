@@ -28,6 +28,7 @@ export function parseIntent(raw: string): Intent | null {
 function normalize(text: string) {
   return text
     .toLowerCase()
+    .replace(/[.,!?]/g, ' ')
     .replace(/\bu(h|m)\b/g, '')
     .replace(/\s+/g, ' ')
     .trim();

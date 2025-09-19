@@ -51,6 +51,9 @@ async function copyStatic() {
     await cp(join(root, file), join(distDir, file));
   }));
   await cp(join(root, 'icons'), join(distDir, 'icons'), { recursive: true });
+  try {
+    await cp(join(root, 'public', 'worklet.js'), join(distDir, 'worklet.js'));
+  } catch {}
 }
 
 async function injectPanelHtml() {

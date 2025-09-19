@@ -6,15 +6,11 @@ import { Controls } from './components/Controls';
 import { ToastProvider, useToast } from './components/Toast';
 import { UI } from './lib/ui-tokens';
 import { transcript } from './lib/transcript';
-import { speak } from './lib/voice';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
 import { insertTextInto } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
-
-const COMMAND_COOLDOWN_MS = 1500;
-let commandCooldownUntil = 0;
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
 export default function App() {
@@ -45,7 +41,7 @@ function AppInner() {
   const commandMessageResetRef = useRef<number | null>(null);
   const [pendingGuard, setPendingGuard] = useState<GuardStatus | null>(null);
 
-  const setCommandFeedback = useCallback((msg: string, persist = false) => {
+  const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
       window.clearTimeout(commandMessageResetRef.current);
       commandMessageResetRef.current = null;
@@ -57,11 +53,165 @@ function AppInner() {
         commandMessageResetRef.current = null;
       }, 2000);
     }
-  }, []);
+  };
 
-  const pushWsEvent = useCallback((msg: string) => {
+  const pushWsEvent = (msg: string) => {
     setWsEvents((prev) => [msg, ...prev].slice(0, 5));
-  }, []);
+  };
+
+  const recordingRef = useRef(recording);
+  const busyRef = useRef(busy);
+  const onToggleRef = useRef(onToggleRecord);
+  const toastRef = useRef(toast);
+  const commandCooldownRef = useRef(0);
+
+  useEffect(() => { recordingRef.current = recording; }, [recording]);
+  useEffect(() => { busyRef.current = busy; }, [busy]);
+  useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
+  useEffect(() => { toastRef.current = toast; }, [toast]);
+
+  function sendInsert(text: string) {
+    chrome.tabs
+      .query({ active: true, lastFocusedWindow: true })
+      .then(([tab]) => {
+        if (tab?.id) {
+          chrome.tabs.sendMessage(tab.id, { type: 'INSERT_TEXT', text }).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
+
+  function speak(text: string) {
+    try {
+      const utterance = new SpeechSynthesisUtterance(text);
+      speechSynthesis?.speak(utterance);
+    } catch {}
+  }
+
+  async function onInsertPlan(opts?: { bypassGuard?: boolean }) {
+    if (!host) {
+      toast.push('No host context for mapping');
+      return;
+    }
+    const planField = profile?.PLAN;
+    if (!planField?.selector) {
+      toast.push('Map PLAN field first');
+      return;
+    }
+    if (!opts?.bypassGuard) {
+      const guard = await verifyPatientBeforeInsert();
+      if (!guard.ok) {
+        if (guard.reason === 'missing') {
+          toast.push('No patient detected. View the chart before inserting.');
+          setLastError('Confirm patient before inserting');
+          return;
+        }
+        if (guard.reason === 'unconfirmed' || guard.reason === 'mismatch') {
+          setPendingGuard(guard);
+          toast.push('Confirm patient before inserting');
+          setLastError('Confirm patient before inserting');
+          pushWsEvent('guard: insert blocked');
+          return;
+        }
+        toast.push('Patient guard error. Try again.');
+        setLastError('Confirm patient before inserting');
+        return;
+      }
+    }
+    const text = transcript
+      .get()
+      .filter((x) => !x.text.startsWith('[MOCK]'))
+      .map((x) => x.text)
+      .join(' ')
+      .trim();
+    const strategy = await insertTextInto(planField.selector, text || '(empty)');
+    toast.push(`Insert via ${strategy}`);
+    pushWsEvent('audit: plan inserted');
+    setLastError(null);
+  }
+
+  const COMMAND_COOLDOWN_MS = 1800;
+
+  // Web Speech result path (hybrid fallback) — parses intent and runs command
+  async function handleSRResult(event: any) {
+    const text = Array.from(event.results)
+      .map((r: any) => r[0]?.transcript || '')
+      .join(' ')
+      .trim();
+    if (!text) return;
+    console.log('[AssistMD][SR] heard:', text);
+
+    if ((window as any).speechSynthesis?.speaking) {
+      try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
+      return;
+    }
+
+    const intent = parseIntent(text);
+    console.log('[AssistMD][SR] intent:', intent);
+    if (!intent) return;
+
+    await runCommand(intent);
+  }
+
+  async function runCommand(intent: ReturnType<typeof parseIntent>) {
+    if (!intent) return;
+    const now = Date.now();
+    if (now < commandCooldownRef.current) return;
+
+    try {
+      await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: COMMAND_COOLDOWN_MS });
+    } catch (err) {
+      console.warn('[AssistMD] COMMAND_WINDOW dispatch failed', err);
+    }
+
+    switch (intent.name) {
+      case 'start':
+        if (!recordingRef.current && !busyRef.current) {
+          onToggleRef.current?.();
+          speak('Recording started');
+          setCommandFeedback('Command: start recording');
+        }
+        break;
+      case 'stop':
+        if (recordingRef.current) {
+          onToggleRef.current?.();
+          speak('Recording stopped');
+          setCommandFeedback('Command: stop recording');
+        }
+        break;
+      case 'bookmark':
+        transcript.addPartial('[bookmark]');
+        speak('Bookmarked');
+        setCommandFeedback('Command: bookmark');
+        break;
+      case 'newline':
+        sendInsert('\n');
+        speak('New line');
+        setCommandFeedback('Command: new line');
+        break;
+      case 'timestamp':
+        sendInsert(new Date().toLocaleTimeString());
+        speak('Timestamp');
+        setCommandFeedback('Command: timestamp');
+        break;
+      case 'insert':
+        speak(`${intent.section} noted`);
+        setCommandFeedback(`Command: insert ${intent.section}`);
+        if (intent.section === 'plan') {
+          await onInsertPlan();
+        } else {
+          toastRef.current?.push(`Insert ${intent.section.toUpperCase()} not wired yet`);
+        }
+        break;
+      default:
+        // No-op
+        break;
+    }
+
+    pushWsEvent(`command: ${intent.name}`);
+    setCommandLog((prev) => [`${new Date().toLocaleTimeString()} · ${intent.name}`, ...prev].slice(0, 5));
+    commandCooldownRef.current = now + COMMAND_COOLDOWN_MS;
+  }
 
   useEffect(() => () => {
     if (commandMessageResetRef.current) {
@@ -69,6 +219,114 @@ function AppInner() {
       commandMessageResetRef.current = null;
     }
   }, []);
+
+  // Web Speech supervisor (hybrid): kept paused during dictation; resumes on quiet
+  useEffect(() => {
+    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SR) {
+      console.warn('[AssistMD] Web Speech not supported');
+      return;
+    }
+
+    let rec: any = null;
+    let live = false;
+    let killed = false;
+    let wantOn = true;
+    let restartTimer: any = null;
+    let cooldownUntil = 0;
+    const RESTART_MS = 600;
+
+    const startSR = () => {
+      if (killed || live || !wantOn) return;
+      if (Date.now() < cooldownUntil) return;
+      try {
+        rec = new SR();
+        rec.lang = 'en-US';
+        rec.continuous = true;
+        rec.interimResults = false;
+        rec.onresult = handleSRResult;
+        rec.onerror = (e: any) => {
+          const err = e?.error || e;
+          const benign = err === 'no-speech' || err === 'aborted' || err === 'network';
+          if (!benign) console.warn('[AssistMD] SpeechRecognition error', err);
+          cooldownUntil = Date.now() + 800;
+        };
+        rec.onend = () => {
+          live = false;
+          if (killed) return;
+          if (wantOn) {
+            clearTimeout(restartTimer);
+            restartTimer = setTimeout(startSR, RESTART_MS);
+          }
+        };
+
+        rec.start();
+        live = true;
+      } catch {
+        live = false;
+        cooldownUntil = Date.now() + 800;
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(startSR, RESTART_MS);
+      }
+    };
+
+    const stopSR = () => {
+      wantOn = false;
+      clearTimeout(restartTimer);
+      if (live && rec) {
+        try { rec.stop(); } catch {}
+      }
+      live = false;
+    };
+
+    const speakGuard = setInterval(() => {
+      const talking = (window as any).speechSynthesis?.speaking;
+      if (talking) {
+        if (live && rec) {
+          try { rec.stop(); } catch {}
+        }
+        live = false;
+      } else if (wantOn && !live) {
+        startSR();
+      }
+    }, 200);
+
+    const onMsg = (m: any) => {
+      if (m?.type === 'ASR_VAD') {
+        if (m.state === 'speaking') {
+          wantOn = false;
+          if (live && rec) {
+            try { rec.stop(); } catch {}
+          }
+          live = false;
+        } else if (m.state === 'quiet') {
+          wantOn = true;
+          startSR();
+        }
+      }
+    };
+    chrome.runtime.onMessage.addListener(onMsg);
+
+    const kick = () => {
+      wantOn = true;
+      startSR();
+    };
+    window.addEventListener('pointerdown', kick, { once: true });
+    window.addEventListener('keydown', kick, { once: true });
+    const idle = setTimeout(() => { wantOn = true; startSR(); }, 800);
+
+    startSR();
+
+    return () => {
+      killed = true;
+      clearTimeout(idle);
+      clearInterval(speakGuard);
+      chrome.runtime.onMessage.removeListener(onMsg);
+      window.removeEventListener('pointerdown', kick);
+      window.removeEventListener('keydown', kick);
+      stopSR();
+    };
+  }, [handleSRResult]);
 
   const getContentTab = useCallback(async () => {
     const tabs = await chrome.tabs.query({ lastFocusedWindow: true });
@@ -163,48 +421,6 @@ function AppInner() {
       toast.push('Unable to enter map mode — reload the EHR tab and try again.');
     }
   }, [toast, getContentTab]);
-
-  const onInsertPlan = useCallback(async (opts?: { bypassGuard?: boolean }) => {
-    if (!host) {
-      toast.push('No host context for mapping');
-      return;
-    }
-    const planField = profile?.PLAN;
-    if (!planField?.selector) {
-      toast.push('Map PLAN field first');
-      return;
-    }
-    if (!opts?.bypassGuard) {
-      const guard = await verifyPatientBeforeInsert();
-      if (!guard.ok) {
-        if (guard.reason === 'missing') {
-          toast.push('No patient detected. View the chart before inserting.');
-          setLastError('Confirm patient before inserting');
-          return;
-        }
-        if (guard.reason === 'unconfirmed' || guard.reason === 'mismatch') {
-          setPendingGuard(guard);
-          toast.push('Confirm patient before inserting');
-          setLastError('Confirm patient before inserting');
-          pushWsEvent('guard: insert blocked');
-          return;
-        }
-        toast.push('Patient guard error. Try again.');
-        setLastError('Confirm patient before inserting');
-        return;
-      }
-    }
-    const text = transcript
-      .get()
-      .filter((x) => !x.text.startsWith('[MOCK]'))
-      .map((x) => x.text)
-      .join(' ')
-      .trim();
-    const strategy = await insertTextInto(planField.selector, text || '(empty)');
-    toast.push(`Insert via ${strategy}`);
-    pushWsEvent('audit: plan inserted');
-    setLastError(null);
-  }, [host, profile, toast, pushWsEvent]);
 
   const formatTranscript = useCallback(() => {
     const items = transcript
@@ -364,106 +580,6 @@ ${section.join(' ')}`;
     }
   }
 
-  // Hands-free command recognizer (always listening for "assist …")
-  useEffect(() => {
-    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!SR) {
-      console.warn('[AssistMD] Web Speech not supported; commands disabled.');
-      return;
-    }
-
-    let rec: any = null;
-    let stopped = false;
-
-    const startRec = () => {
-      if (stopped) return;
-      rec = new SR();
-      rec.lang = 'en-US';
-      rec.continuous = true;
-      rec.interimResults = false;
-
-      rec.onresult = async (e: any) => {
-        const text = Array.from(e.results).map((r: any) => r[0]?.transcript || '').join(' ').trim();
-        if (!text) return;
-
-        if ((window as any).speechSynthesis?.speaking) {
-          try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
-          return;
-        }
-
-        const intent = parseIntent(text);
-        if (!intent) return;
-
-        const now = Date.now();
-        if (now < commandCooldownUntil) return;
-
-        try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: COMMAND_COOLDOWN_MS }); } catch {}
-
-        switch (intent.name) {
-          case 'start':
-            if (!recording && !busy) {
-              await onToggleRecord();
-              speak('Recording started');
-              setCommandFeedback('Command: start recording');
-            }
-            break;
-          case 'stop':
-            if (recording) {
-              await onToggleRecord();
-              speak('Recording stopped');
-              setCommandFeedback('Command: stop recording');
-            }
-            break;
-          case 'bookmark':
-            transcript.addPartial('[bookmark]');
-            speak('Bookmarked');
-            setCommandFeedback('Command: bookmark');
-            break;
-          case 'newline':
-            await chrome.runtime.sendMessage({ type: 'COMMAND_INSERT_TEXT', text: '\n' }).catch(() => {});
-            speak('New line');
-            setCommandFeedback('Command: new line');
-            break;
-          case 'timestamp':
-            await chrome.runtime.sendMessage({ type: 'COMMAND_INSERT_TEXT', text: new Date().toLocaleTimeString() }).catch(() => {});
-            speak('Timestamp');
-            setCommandFeedback('Command: timestamp');
-            break;
-          case 'insert':
-            speak(`${intent.section} noted`);
-            setCommandFeedback(`Command: insert ${intent.section}`);
-            if (intent.section === 'plan') {
-              await onInsertPlan();
-            } else {
-              toast.push(`Insert ${intent.section.toUpperCase()} not wired yet`);
-            }
-            break;
-          default:
-            toast.push(`Heard: “${text}”`);
-            setCommandFeedback(`Heard: ${text}`);
-            break;
-        }
-
-        pushWsEvent(`command: ${intent.name}`);
-        setCommandLog((prev) => [`${new Date().toLocaleTimeString()} · ${intent.name}`, ...prev].slice(0, 5));
-        commandCooldownUntil = now + COMMAND_COOLDOWN_MS;
-      };
-
-      rec.onerror = () => {};
-      rec.onend = () => {
-        if (!stopped) setTimeout(startRec, 250);
-      };
-
-      try { rec.start(); } catch {}
-    };
-
-    startRec();
-    return () => {
-      stopped = true;
-      try { rec && rec.stop(); } catch {}
-    };
-  }, [busy, onInsertPlan, onToggleRecord, pushWsEvent, recording, setCommandFeedback, toast]);
-
   // Listen for status + data from background/offscreen
   useEffect(() => {
     const handler = (m: any) => {
@@ -516,12 +632,26 @@ ${section.join(' ')}`;
         }
       }
       if (m?.type === 'ASR_PARTIAL') {
-        pushWsEvent(`partial: ${m.text?.slice(0, 30) || ''}`);
-        if (m.text) {
+        const txt = String(m.text || '');
+        pushWsEvent(`partial: ${txt.slice(0, 30)}`);
+        if (txt) {
+          // Wake on "assist …" directly from partials
+          const low = txt.toLowerCase();
+          const idx = low.indexOf('assist ');
+          if (idx !== -1) {
+            const tail = low.slice(idx + 'assist '.length).trim();
+            const intent = parseIntent('assist ' + tail);
+            if (intent) {
+              // Run command and do not add this partial to transcript
+              runCommand(intent);
+              return;
+            }
+          }
+
           setMode('live');
           setWsState('open');
           setLastError(null);
-          transcript.addPartial(m.text, m.t0, m.t1);
+          transcript.addPartial(txt, m.t0, m.t1);
         }
       }
       if (m?.type === 'MAP_PICK' && m.selector && m.section) {
