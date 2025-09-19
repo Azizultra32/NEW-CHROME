@@ -144,6 +144,8 @@ function AppInner() {
       .trim();
     if (!text) return;
     console.log('[AssistMD][SR] heard:', text);
+    // Reflect in live word strip too
+    setLiveWords(text);
 
     if ((window as any).speechSynthesis?.speaking) {
       try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
@@ -735,10 +737,10 @@ ${section.join(' ')}`;
               onOpacity={setOpacity}
               onOpenSettings={() => setSettingsOpen((v) => !v)}
             />
-            {!!liveWords && (
-              <div className="rounded-md border border-slate-200 bg-white/80 px-2 py-1 text-[12px] text-slate-700">
+            {(recording || wsState !== 'disconnected') && (
+              <div className="rounded-md border border-slate-200 bg-white/90 px-2 py-1 text-[12px] text-slate-700" style={{maxHeight: 56, overflow: 'hidden'}}>
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2 align-middle" />
-                {liveWords}
+                {liveWords || 'Listening…'}
               </div>
             )}
             {settingsOpen && (
