@@ -9,7 +9,7 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto } from './lib/insert';
+import { insertTextInto, insertUsingMapping } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
@@ -66,6 +66,8 @@ function AppInner() {
   const toastRef = useRef(toast);
   const commandCooldownRef = useRef(0);
   const lastPartialIntentRef = useRef<{ name: string; until: number } | null>(null);
+  const processedMessageIds = useRef<Set<string>>(new Set());
+  const messageIdCleanupRef = useRef<number | null>(null);
 
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
@@ -126,7 +128,10 @@ function AppInner() {
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const strategy = await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
+    // If mapping targets a popup, resolve and insert there; else use current tab
+    const strategy = planField.target === 'popup'
+      ? await insertUsingMapping(planField, text || '(empty)')
+      : await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
     toast.push(`Insert via ${strategy}`);
     pushWsEvent('audit: plan inserted');
     setLastError(null);
@@ -695,6 +700,20 @@ ${section.join(' ')}`;
         }
       }
       if (m?.type === 'ASR_PARTIAL') {
+        // Check for message ID to prevent duplicates
+        if (m.id && processedMessageIds.current.has(m.id)) {
+          console.log('[AssistMD] Skipping duplicate message:', m.id);
+          return;
+        }
+        if (m.id) {
+          processedMessageIds.current.add(m.id);
+          // Clean up old IDs every 30 seconds
+          if (messageIdCleanupRef.current) clearTimeout(messageIdCleanupRef.current);
+          messageIdCleanupRef.current = window.setTimeout(() => {
+            processedMessageIds.current.clear();
+          }, 30000);
+        }
+        
         const txt = String(m.text || '');
         pushWsEvent(`partial: ${txt.slice(0, 30)}`);
         if (txt) {
@@ -730,12 +749,22 @@ ${section.join(' ')}`;
       }
       if (m?.type === 'MAP_PICK' && m.selector && m.section) {
         const next = { ...(profile || {}) };
+        const target: 'page' | 'iframe' | 'popup' = (Array.isArray(m.framePath) && m.framePath.length > 0)
+          ? 'iframe'
+          : (m.isPopup ? 'popup' : 'page');
+        // Derive a simple URL pattern for popups
+        const href: string = typeof m.href === 'string' ? m.href : '';
+        const urlPattern = href ? href.replace(/\?.*$/, '*') : undefined;
+        const titleIncl: string | undefined = typeof m.title === 'string' && m.title.length ? m.title.slice(0, 48) : undefined;
         next[m.section as Section] = {
           section: m.section,
           selector: m.selector,
           strategy: 'value',
           verified: false,
-          framePath: Array.isArray(m.framePath) ? m.framePath : undefined
+          framePath: Array.isArray(m.framePath) ? m.framePath : undefined,
+          target,
+          popupUrlPattern: target === 'popup' ? urlPattern : undefined,
+          popupTitleIncludes: target === 'popup' ? titleIncl : undefined
         };
         setProfile(next);
         if (host) saveProfile(host, next);

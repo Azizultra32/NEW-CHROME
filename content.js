@@ -62,7 +62,10 @@
         o.style.display = prev || 'block';
         if (!picked) return;
         const { selector, framePath } = picked;
-        safeSend({ type:'MAP_PICK', section: currentSection, selector, framePath });
+        const href = location && location.href || '';
+        const title = document && document.title || '';
+        const isPopup = (window === window.top) && !!window.opener;
+        safeSend({ type:'MAP_PICK', section: currentSection, selector, framePath, href, title, isPopup });
         toggle(false);
       }, true);
     }
