@@ -25,8 +25,10 @@ export function parseIntent(raw: string): Intent | null {
   if (/^(timestamp|time\s?stamp|time)$/.test(rest)) return { name: 'timestamp' };
   if (/^(new\s?line|newline|new\s?paragraph)$/.test(rest)) return { name: 'newline' };
 
+  // Insert commands
   const m = rest.match(/^(insert|add) (plan|hpi|ros|exam)$/);
   if (m) return { name: 'insert', section: m[2] as any };
+  
   return null;
 }
 

@@ -252,11 +252,13 @@ function AppInner() {
     let live = false;
     let killed = false;
     let wantOn = true;
+    console.log('[AssistMD] SR supervisor starting');
     let restartTimer: any = null;
     let cooldownUntil = 0;
     const RESTART_MS = 600;
 
     const startSR = () => {
+      console.log('[AssistMD] startSR called', { killed, live, wantOn, cooldown: Date.now() < cooldownUntil });
       if (killed || live || !wantOn) return;
       if (Date.now() < cooldownUntil) return;
       try {
@@ -282,7 +284,9 @@ function AppInner() {
 
         rec.start();
         live = true;
-      } catch {
+        console.log('[AssistMD] SR started successfully');
+      } catch (err) {
+        console.error('[AssistMD] SR start failed:', err);
         live = false;
         cooldownUntil = Date.now() + 800;
         clearTimeout(restartTimer);
@@ -314,12 +318,14 @@ function AppInner() {
     const onMsg = (m: any) => {
       if (m?.type === 'ASR_VAD') {
         if (m.state === 'speaking') {
+          // Stop SR during dictation to avoid interference
           wantOn = false;
           if (live && rec) {
             try { rec.stop(); } catch {}
           }
           live = false;
         } else if (m.state === 'quiet') {
+          // Resume SR when dictation stops
           wantOn = true;
           startSR();
         }
@@ -331,11 +337,44 @@ function AppInner() {
       wantOn = true;
       startSR();
     };
+    
+    // Chrome requires user gesture for speech recognition
+    // Try multiple strategies to start as soon as possible
+    
+    // Strategy 1: Start when panel opens (may work in side panel context)
+    wantOn = true;
+    startSR();
+    
+    // Strategy 2: Start after any Chrome API interaction
+    chrome.runtime.sendMessage({ type: 'PING' }).then(() => {
+      if (!live) {
+        console.log('[AssistMD] Starting SR after API interaction');
+        wantOn = true;
+        startSR();
+      }
+    }).catch(() => {});
+    
+    // Strategy 3: Auto-start when recording begins
+    const watchRecording = setInterval(() => {
+      if (recordingRef.current && !live) {
+        console.log('[AssistMD] Auto-starting SR with recording');
+        wantOn = true;
+        startSR();
+        clearInterval(watchRecording);
+      }
+    }, 100);
+    setTimeout(() => clearInterval(watchRecording), 5000); // Give up after 5s
+    
+    // Keep the user gesture fallbacks
     window.addEventListener('pointerdown', kick, { once: true });
     window.addEventListener('keydown', kick, { once: true });
-    const idle = setTimeout(() => { wantOn = true; startSR(); }, 800);
-
-    startSR();
+    const idle = setTimeout(() => { 
+      if (!live) {
+        console.log('[AssistMD] Attempting idle SR start');
+        wantOn = true; 
+        startSR(); 
+      }
+    }, 800);
 
     return () => {
       killed = true;
@@ -346,7 +385,7 @@ function AppInner() {
       window.removeEventListener('keydown', kick);
       stopSR();
     };
-  }, [handleSRResult]);
+  }, []);
 
   const getContentTab = useCallback(async () => {
     const tabs = await chrome.tabs.query({ lastFocusedWindow: true });
