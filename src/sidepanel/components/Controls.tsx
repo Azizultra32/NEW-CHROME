@@ -13,6 +13,7 @@ type Props = {
 
 export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onInsertPlan, onCopyTranscript, transcriptFormat = 'RAW', onFormatChange, onMapFields }) => {
   const disabledLook = 'opacity-60 cursor-not-allowed';
+  const canMapFields = typeof onMapFields === 'function';
 
   return (
     <div className="grid grid-cols-2 gap-2">
@@ -55,8 +56,10 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
         </select>
       </div>
       <button
-        className="rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 col-span-2 opacity-60 cursor-not-allowed"
-        disabled
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 col-span-2 ${
+          canMapFields ? 'hover:bg-slate-200' : disabledLook
+        }`}
+        disabled={!canMapFields}
         onClick={() => onMapFields?.()}
       >
         Map Fields

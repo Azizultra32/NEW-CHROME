@@ -13,7 +13,6 @@ import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
 import { insertTextInto } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
 
-const COMMAND_PREFIX = 'assist ';
 const COMMAND_COOLDOWN_MS = 1500;
 let commandCooldownUntil = 0;
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
