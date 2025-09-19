@@ -44,9 +44,14 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
   (async () => {
     if (msg?.type === 'START_CAPTURE') {
       console.log(`[${TAG}] START_CAPTURE`);
-      await ensureOffscreen();
-      chrome.runtime.sendMessage({ type: 'OFFSCREEN_START' }).catch(() => {});
-      send({ ok: true });
+      try {
+        await ensureOffscreen();
+        chrome.runtime.sendMessage({ type: 'OFFSCREEN_START' }).catch(() => {});
+        send({ ok: true });
+      } catch (error) {
+        console.error(`[${TAG}] ensureOffscreen failed`, error);
+        send({ ok: false, error: String(error) });
+      }
       return;
     }
 

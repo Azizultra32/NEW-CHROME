@@ -1,6 +1,8 @@
 export type Intent =
   | { name: 'start' }
   | { name: 'stop' }
+  | { name: 'pause' }
+  | { name: 'resume' }
   | { name: 'bookmark' }
   | { name: 'newline' }
   | { name: 'timestamp' }
@@ -13,6 +15,8 @@ export function parseIntent(raw: string): Intent | null {
 
   if (/^start( recording|$)/.test(rest)) return { name: 'start' };
   if (/^stop( recording|$)/.test(rest)) return { name: 'stop' };
+  if (/^pause( recording|$)/.test(rest)) return { name: 'pause' };
+  if (/^resume( recording|$)/.test(rest)) return { name: 'resume' };
   if (rest === 'bookmark') return { name: 'bookmark' };
   if (rest === 'timestamp') return { name: 'timestamp' };
   if (/^(new\s?line|newline)$/.test(rest)) return { name: 'newline' };

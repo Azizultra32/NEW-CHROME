@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { parseIntent, isTtsSpeaking } from '../lib/voice';
+import { parseIntent, Intent } from '../intent';
+import { isTtsSpeaking } from '../lib/voice';
 
 type Opts = {
-  onIntent: (intent: ReturnType<typeof parseIntent>) => void;
+  onIntent: (intent: Intent) => void;
   onListeningChange?: (listening: boolean) => void;
   autoStart?: boolean;
 };
@@ -28,7 +29,9 @@ export function useVoice({ onIntent, onListeningChange, autoStart = false }: Opt
           .join(' ')
           .trim();
         if (!transcript) return;
-        onIntent(parseIntent(transcript));
+        const intent = parseIntent(transcript);
+        if (!intent) return;
+        onIntent(intent);
       };
       r.onstart = () => {
         setListening(true);
