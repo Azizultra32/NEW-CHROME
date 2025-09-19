@@ -40,6 +40,7 @@ function AppInner() {
   const [commandMessage, setCommandMessage] = useState(BASE_COMMAND_MESSAGE);
   const commandMessageResetRef = useRef<number | null>(null);
   const [pendingGuard, setPendingGuard] = useState<GuardStatus | null>(null);
+  const [liveWords, setLiveWords] = useState('');
 
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
@@ -186,6 +187,20 @@ function AppInner() {
         transcript.addPartial('[bookmark]');
         speak('Bookmarked');
         setCommandFeedback('Command: bookmark');
+        break;
+      case 'pause':
+        if (recordingRef.current) {
+          onToggleRef.current?.();
+          speak('Recording paused');
+          setCommandFeedback('Command: pause recording');
+        }
+        break;
+      case 'resume':
+        if (!recordingRef.current && !busyRef.current) {
+          onToggleRef.current?.();
+          speak('Recording resumed');
+          setCommandFeedback('Command: resume recording');
+        }
         break;
       case 'newline':
         sendInsert('\n');
@@ -638,6 +653,8 @@ ${section.join(' ')}`;
         const txt = String(m.text || '');
         pushWsEvent(`partial: ${txt.slice(0, 30)}`);
         if (txt) {
+          // Update live word feed (small UI strip)
+          setLiveWords(txt);
           // Wake on "assist …" directly from partials
           const low = txt.toLowerCase();
           const idx = low.indexOf('assist ');
@@ -718,6 +735,12 @@ ${section.join(' ')}`;
               onOpacity={setOpacity}
               onOpenSettings={() => setSettingsOpen((v) => !v)}
             />
+            {!!liveWords && (
+              <div className="rounded-md border border-slate-200 bg-white/80 px-2 py-1 text-[12px] text-slate-700">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2 align-middle" />
+                {liveWords}
+              </div>
+            )}
             {settingsOpen && (
               <div className="rounded-lg border border-slate-200 bg-white/95 p-3 space-y-2">
                 <div className="text-sm font-medium">Settings</div>
