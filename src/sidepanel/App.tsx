@@ -11,6 +11,7 @@ import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
 import { insertTextInto } from './lib/insert';
+import { isDevelopmentBuild } from './lib/env';
 
 const COMMAND_PREFIX = 'assist ';
 const COMMAND_COOLDOWN_MS = 1500;
@@ -563,7 +564,7 @@ ${section.join(' ')}`;
     color: UI.colors.text
   }), [focusMode, opacity]);
 
-  const wsMonitor = process.env.NODE_ENV !== 'production' && (
+  const wsMonitor = isDevelopmentBuild && (
     <div className="text-[11px] text-slate-500 space-y-1">
       {wsEvents.map((e, i) => (<div key={i}>• {e}</div>))}
     </div>
