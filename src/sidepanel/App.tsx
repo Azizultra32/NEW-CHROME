@@ -134,8 +134,11 @@ function AppInner() {
 
   // Web Speech result path (hybrid fallback) — parses intent and runs command
   async function handleSRResult(event: any) {
-    const text = Array.from(event.results)
-      .map((r: any) => r[0]?.transcript || '')
+    // Use only the latest result to avoid accumulating previous phrases
+    const idx = typeof event.resultIndex === 'number' ? event.resultIndex : event.results.length - 1;
+    const res = event.results[idx] || event.results[event.results.length - 1];
+    const text = Array.from(res)
+      .map((r: any) => r?.transcript || '')
       .join(' ')
       .trim();
     if (!text) return;

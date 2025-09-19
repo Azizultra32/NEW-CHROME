@@ -10,8 +10,9 @@ export type Intent =
 
 export function parseIntent(raw: string): Intent | null {
   const s = normalize(raw);
-  if (!s.startsWith('assist ')) return null;
-  const rest = s.slice(7).trim();
+  // Accept wake word anywhere; if absent, allow direct phrases
+  const idx = s.indexOf('assist ');
+  const rest = idx !== -1 ? s.slice(idx + 7).trim() : s;
 
   if (/^start( recording|$)/.test(rest)) return { name: 'start' };
   if (/^stop( recording|$)/.test(rest)) return { name: 'stop' };
@@ -28,8 +29,8 @@ export function parseIntent(raw: string): Intent | null {
 function normalize(text: string) {
   return text
     .toLowerCase()
-    .replace(/[.,!?]/g, ' ')
-    .replace(/\bu(h|m)\b/g, '')
+    .replace(/[.,!?;:'"’]/g, ' ')
+    .replace(/\b(u(h|m)|uh|um)\b/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
