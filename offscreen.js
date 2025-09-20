@@ -73,6 +73,9 @@ let state = 'idle'; // idle | starting | running | stopping | error
 let rec = null;
 let ws = null;
 let wsUrl = null;
+let hbTimer = null;
+let retryTimer = null;
+let retryDelayMs = 1000; // exponential backoff up to 10s
 
 let cfg = { wsUrl: null, headers: {} };
 let suppressUntil = 0;
@@ -201,6 +204,12 @@ function connectWs(url) {
     try {
       if (rec && rec.state === 'inactive') rec.start(300); // ~0.3s chunks
     } catch {}
+    // Reset backoff and start heartbeat
+    retryDelayMs = 1000;
+    try { if (hbTimer) clearInterval(hbTimer); } catch {}
+    hbTimer = setInterval(() => {
+      try { ws && ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
+    }, 10000);
   };
   ws.onmessage = (ev) => {
     try {
@@ -222,6 +231,19 @@ function connectWs(url) {
     console.log(`[${TAG}][WS][CLOSE] code=`, ev.code, 'reason=', ev.reason);
     chrome.runtime.sendMessage({ type: 'ASR_WS_STATE', state: 'closed' }).catch(() => {});
     try { rec && rec.state !== 'inactive' && rec.stop(); } catch {}
+    // Stop heartbeat
+    try { if (hbTimer) clearInterval(hbTimer); } catch {}
+    hbTimer = null;
+    // Schedule reconnect if we were running and have a URL
+    if (state === 'running' && wsUrl) {
+      const delay = Math.min(10000, retryDelayMs);
+      console.log(`[${TAG}][WS][RETRY] in ${delay}ms`);
+      try { if (retryTimer) clearTimeout(retryTimer); } catch {}
+      retryTimer = setTimeout(() => {
+        connectWs(wsUrl);
+      }, delay);
+      retryDelayMs = Math.min(10000, retryDelayMs * 2);
+    }
   };
 }
 

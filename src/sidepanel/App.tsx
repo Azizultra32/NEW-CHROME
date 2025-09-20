@@ -516,13 +516,23 @@ function AppInner() {
     } catch { toast.push('Import failed'); }
   }, [host, toast]);
 
-  // Keyboard toggle for focus
+  // Keyboard shortcuts: focus toggle + record toggle (Alt+R)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mac = navigator.platform.toUpperCase().includes('MAC');
+      // Focus toggle: Cmd/Ctrl + `
       if ((mac ? e.metaKey : e.ctrlKey) && e.key === '`') {
         setFocusMode((f) => !f);
         e.preventDefault();
+        return;
+      }
+      // Record toggle: Alt + r
+      if (e.altKey && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault();
+        if (!busyRef.current) {
+          onToggleRef.current();
+        }
+        return;
       }
     };
     window.addEventListener('keydown', onKey, { passive: false });
