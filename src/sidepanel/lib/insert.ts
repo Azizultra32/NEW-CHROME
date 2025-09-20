@@ -23,16 +23,63 @@ export async function insertTextInto(selector: string, text: string, framePath?:
       const doc = w?.document || document;
       const el = (doc.querySelector(sel) as any) || null;
       if (!el) return 'fail';
+      // ContentEditable: prefer Range insertion, fallback to execCommand
       if (el.isContentEditable) {
-        el.focus();
+        try {
+          el.focus();
+          const sel = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
+          if (sel && sel.rangeCount > 0) {
+            let range = sel.getRangeAt(0);
+            // Ensure range is within the editable element; if not, create a new range at the end
+            const within = el.contains(range.startContainer);
+            if (!within) {
+              range = doc.createRange();
+              range.selectNodeContents(el);
+              range.collapse(false);
+            }
+            // Insert text node
+            const node = doc.createTextNode(value);
+            range.deleteContents();
+            range.insertNode(node);
+            // Move caret to end of inserted node
+            range.setStartAfter(node);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            return 'execCommand';
+          }
+        } catch {}
         const ok = (doc as Document).execCommand('insertText', false, value);
         return ok ? 'execCommand' : 'fail';
       }
+      // Input/Textarea: insert at caret, preserve selection and dispatch input
       if ('value' in el) {
+        try {
+          const disabled = !!el.disabled || el.getAttribute?.('aria-disabled') === 'true';
+          const ro = !!el.readOnly || el.getAttribute?.('readonly') !== null || el.getAttribute?.('aria-readonly') === 'true';
+          if (disabled || ro) return 'fail';
+        } catch {}
         el.focus();
-        el.value = value;
-        el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
-        return 'value';
+        try {
+          const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value?.length || 0);
+          const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : (el.value?.length || 0);
+          const src = String(el.value ?? '');
+          const before = src.slice(0, start);
+          const after = src.slice(end);
+          const next = before + value + after;
+          el.value = next;
+          const pos = (before + value).length;
+          if (typeof el.setSelectionRange === 'function') {
+            try { el.setSelectionRange(pos, pos); } catch {}
+          }
+          el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
+          return 'value';
+        } catch {
+          // Fallback to replace-all behavior
+          el.value = value;
+          el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
+          return 'value';
+        }
       }
       return 'fail';
     },
@@ -141,16 +188,59 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
       const doc = w?.document || document;
       const el = (doc.querySelector(sel) as any) || null;
       if (!el) return 'fail';
+      // ContentEditable: prefer Range insertion, fallback to execCommand
       if (el.isContentEditable) {
-        el.focus();
+        try {
+          el.focus();
+          const sel = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
+          if (sel && sel.rangeCount > 0) {
+            let range = sel.getRangeAt(0);
+            const within = el.contains(range.startContainer);
+            if (!within) {
+              range = doc.createRange();
+              range.selectNodeContents(el);
+              range.collapse(false);
+            }
+            const node = doc.createTextNode(value);
+            range.deleteContents();
+            range.insertNode(node);
+            range.setStartAfter(node);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            return 'execCommand';
+          }
+        } catch {}
         const ok = (doc as Document).execCommand('insertText', false, value);
         return ok ? 'execCommand' : 'fail';
       }
+      // Input/Textarea: caret-aware insertion
       if ('value' in el) {
+        try {
+          const disabled = !!el.disabled || el.getAttribute?.('aria-disabled') === 'true';
+          const ro = !!el.readOnly || el.getAttribute?.('readonly') !== null || el.getAttribute?.('aria-readonly') === 'true';
+          if (disabled || ro) return 'fail';
+        } catch {}
         el.focus();
-        el.value = value;
-        el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
-        return 'value';
+        try {
+          const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value?.length || 0);
+          const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : (el.value?.length || 0);
+          const src = String(el.value ?? '');
+          const before = src.slice(0, start);
+          const after = src.slice(end);
+          const next = before + value + after;
+          el.value = next;
+          const pos = (before + value).length;
+          if (typeof el.setSelectionRange === 'function') {
+            try { el.setSelectionRange(pos, pos); } catch {}
+          }
+          el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
+          return 'value';
+        } catch {
+          el.value = value;
+          el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
+          return 'value';
+        }
       }
       return 'fail';
     },
@@ -190,8 +280,15 @@ export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult>
       const doc = w?.document || document;
       const el = (doc.querySelector(sel) as any) || null;
       if (!el) return { ok: false, reason: 'missing' } as any;
-      const editable = !!(el.isContentEditable || 'value' in el);
-      return editable ? ({ ok: true } as any) : ({ ok: false, reason: 'not_editable' } as any);
+      // Compute editability for inputs/textarea and contenteditable targets
+      const isFormField = 'value' in el;
+      const isCE = !!el.isContentEditable;
+      if (!isFormField && !isCE) return { ok: false, reason: 'not_editable' } as any;
+      // Disabled / readonly checks
+      const disabled = !!el.disabled || el.getAttribute?.('aria-disabled') === 'true';
+      const readonlyAttr = el.getAttribute?.('readonly') !== null || el.getAttribute?.('aria-readonly') === 'true' || !!el.readOnly;
+      if (disabled || readonlyAttr) return { ok: false, reason: 'not_editable' } as any;
+      return { ok: true } as any;
     },
     args: [mapping.selector, mapping.framePath]
   }).catch(() => null);

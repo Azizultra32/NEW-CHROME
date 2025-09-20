@@ -88,6 +88,15 @@ function AppInner() {
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
 
+  // Load last transcript from storage on mount
+  useEffect(() => {
+    transcript.loadFromStorage().then((ok) => {
+      if (ok) {
+        try { toast.push('Loaded last transcript'); } catch {}
+      }
+    }).catch(() => {});
+  }, []);
+
   function sendInsert(text: string) {
     chrome.tabs
       .query({ active: true, lastFocusedWindow: true })
@@ -106,14 +115,14 @@ function AppInner() {
     } catch {}
   }
 
-  async function onInsertPlan(opts?: { bypassGuard?: boolean }) {
+  async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
     if (!host) {
       toast.push('No host context for mapping');
       return;
     }
-    const planField = profile?.PLAN;
-    if (!planField?.selector) {
-      toast.push('Map PLAN field first');
+    const field = profile?.[section];
+    if (!field?.selector) {
+      toast.push(`Map ${section} field first`);
       return;
     }
     if (!opts?.bypassGuard) {
@@ -129,7 +138,7 @@ function AppInner() {
           toast.push('Confirm patient before inserting');
           setLastError('Confirm patient before inserting');
           pushWsEvent('guard: insert blocked');
-          audit('insert_blocked', { reason: guard.reason });
+          audit('insert_blocked', { reason: guard.reason, section });
           return;
         }
         toast.push('Patient guard error. Try again.');
@@ -139,18 +148,18 @@ function AppInner() {
     }
     // Verify target exists and editable
     const verify = await verifyTarget({
-      section: 'PLAN',
-      selector: planField.selector,
-      strategy: planField.strategy,
-      verified: planField.verified,
-      framePath: planField.framePath,
-      target: (planField as any).target,
-      popupUrlPattern: (planField as any).popupUrlPattern,
-      popupTitleIncludes: (planField as any).popupTitleIncludes
+      section,
+      selector: field.selector,
+      strategy: field.strategy,
+      verified: field.verified,
+      framePath: field.framePath,
+      target: (field as any).target,
+      popupUrlPattern: (field as any).popupUrlPattern,
+      popupTitleIncludes: (field as any).popupTitleIncludes
     } as any);
     if (!verify.ok) {
       const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
-      toast.push(`${reason}. Remap the PLAN field and try again.`);
+      toast.push(`${reason}. Remap the ${section} field and try again.`);
       setLastError(reason);
       return;
     }
@@ -161,12 +170,13 @@ function AppInner() {
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const strategy = (planField as any).target === 'popup'
-      ? await insertUsingMapping(planField as any, text || '(empty)')
-      : await insertTextInto(planField.selector, text || '(empty)', planField.framePath);
-    toast.push(`Insert via ${strategy}`);
-    pushWsEvent('audit: plan inserted');
-    audit('insert_ok', { strategy });
+    const payload = text || '(empty)';
+    const strategy = (field as any).target === 'popup'
+      ? await insertUsingMapping(field as any, payload)
+      : await insertTextInto(field.selector, payload, field.framePath);
+    toast.push(`Insert ${section} via ${strategy}`);
+    pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
+    audit('insert_ok', { strategy, section });
     setLastError(null);
   }
 
@@ -259,11 +269,10 @@ function AppInner() {
       case 'insert':
         speak(`${intent.section} noted`);
         setCommandFeedback(`Command: insert ${intent.section}`);
-        if (intent.section === 'plan') {
-          await onInsertPlan();
-        } else {
-          toastRef.current?.push(`Insert ${intent.section.toUpperCase()} not wired yet`);
-        }
+        if (intent.section === 'plan') await onInsert('PLAN');
+        if (intent.section === 'hpi') await onInsert('HPI');
+        if (intent.section === 'ros') await onInsert('ROS');
+        if (intent.section === 'exam') await onInsert('EXAM');
         break;
       default:
         // No-op
@@ -574,8 +583,13 @@ function AppInner() {
     }
 
     try {
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: 'PLAN' });
-      toast.push('Click a PLAN field to map');
+      // Prompt for section to map (quick, non-blocking UI)
+      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
+      const section = (String(choice || 'PLAN').toUpperCase() as Section);
+      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
+      const pick = valid ? section : 'PLAN';
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
+      toast.push(`Click a ${pick} field to map`);
       return;
     } catch (primaryErr) {
       console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
@@ -586,9 +600,12 @@ function AppInner() {
         target: { tabId: activeTab.id },
         files: ['content.js']
       });
-
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: 'PLAN' });
-      toast.push('Click a PLAN field to map');
+      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
+      const section = (String(choice || 'PLAN').toUpperCase() as Section);
+      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
+      const pick = valid ? section : 'PLAN';
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
+      toast.push(`Click a ${pick} field to map`);
     } catch (fallbackErr) {
       console.error('MAP_MODE fallback failed', fallbackErr);
       toast.push('Unable to enter map mode — reload the EHR tab and try again.');
@@ -946,7 +963,7 @@ ${section.join(' ')}`;
                   onChange={(e) => setApiBase(e.target.value)}
                   placeholder="https://api.your-domain.com"
                 />
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <button
                     className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                     onClick={saveApiBase}
@@ -967,6 +984,21 @@ ${section.join(' ')}`;
                       e.currentTarget.value = '';
                     }} />
                   </label>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => {
+                      const ok = await transcript.loadFromStorage().catch(() => false);
+                      toast.push(ok ? 'Transcript restored' : 'No saved transcript');
+                    }}
+                  >
+                    Load Last Transcript
+                  </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={() => { transcript.clear(); toast.push('Transcript cleared'); }}
+                  >
+                    Clear Transcript
+                  </button>
                   <button
                     className="px-2 py-1 text-xs rounded-md border border-slate-300"
                     onClick={() => setSettingsOpen(false)}
@@ -1011,7 +1043,7 @@ ${section.join(' ')}`;
               recording={recording}
               busy={busy}
               onToggleRecord={onToggleRecord}
-              onInsertPlan={onInsertPlan}
+              onInsertPlan={() => onInsert('PLAN')}
               onCopyTranscript={onCopyTranscript}
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
@@ -1030,7 +1062,7 @@ ${section.join(' ')}`;
                       try { await audit('patient_confirmed', { preview: pendingGuard.preview, fp: pendingGuard.fp }); } catch {}
                       setPendingGuard(null);
                       toast.push('Patient confirmed');
-                      await onInsertPlan({ bypassGuard: true });
+                      await onInsert('PLAN', { bypassGuard: true });
                     }}
                   >
                     Confirm patient
