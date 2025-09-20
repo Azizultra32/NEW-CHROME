@@ -557,6 +557,38 @@ function AppInner() {
     }
   }, [apiBase, toast]);
 
+  const onBackupAll = useCallback(async () => {
+    try {
+      const bag = await chrome.storage.local.get(null);
+      const keep = Object.keys(bag).filter((k) => (
+        k === 'API_BASE' || k.startsWith('MAP_') || k.startsWith('TPL_') || k.startsWith('FEAT_') || k === 'ASSIST_CONFIRMED_FP'
+      ));
+      const snapshot: any = { ts: Date.now(), version: 1, data: {} };
+      keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'assistmd-backup.json'; a.click();
+      URL.revokeObjectURL(url);
+      toast.push('Backup downloaded');
+    } catch {
+      toast.push('Backup failed');
+    }
+  }, [toast]);
+
+  const onRestoreAll = useCallback(async (file: File) => {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text || '{}');
+      const data = parsed?.data || parsed;
+      if (!data || typeof data !== 'object') { toast.push('Invalid backup file'); return; }
+      await chrome.storage.local.set(data);
+      toast.push('Backup restored. Reload the EHR page.');
+    } catch {
+      toast.push('Restore failed');
+    }
+  }, [toast]);
+
   // Load API base on mount
   useEffect(() => {
     (async () => {
@@ -1083,6 +1115,20 @@ ${section.join(' ')}`;
                     <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => {
                       const f = e.target.files?.[0];
                       if (f) onImportMappings(f);
+                      e.currentTarget.value = '';
+                    }} />
+                  </label>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={onBackupAll}
+                  >
+                    Backup All Settings
+                  </button>
+                  <label className="px-2 py-1 text-xs rounded-md border border-slate-300 cursor-pointer">
+                    Restore All
+                    <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onRestoreAll(f);
                       e.currentTarget.value = '';
                     }} />
                   </label>
