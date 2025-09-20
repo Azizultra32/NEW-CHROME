@@ -53,22 +53,23 @@ function AppInner() {
   };
 
   // Feature flags to mitigate risk and allow quick disable
-  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true });
+  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true, preview: false });
   useEffect(() => {
     (async () => {
       try {
-        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI']);
+        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI','FEAT_PREVIEW']);
         setFeatures({
           templates: bag.FEA_TEMPLATES ?? bag.FEAT_TEMPLATES ?? true,
           undo: bag.FEA_UNDO ?? bag.FEAT_UNDO ?? true,
-          multi: bag.FEA_MULTI ?? bag.FEAT_MULTI ?? true
+          multi: bag.FEA_MULTI ?? bag.FEAT_MULTI ?? true,
+          preview: bag.FEA_PREVIEW ?? bag.FEAT_PREVIEW ?? false
         });
       } catch {}
     })();
   }, []);
-  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean }) => {
+  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean }) => {
     try {
-      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi });
+      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview });
       setFeatures(next);
       toast.push('Features updated');
     } catch { toast.push('Failed to update features'); }
@@ -126,6 +127,19 @@ function AppInner() {
     }).catch(() => {});
   }, []);
 
+  // Load saved templates on mount to honor user customizations without manual click
+  useEffect(() => {
+    (async () => {
+      try {
+        const bag = await chrome.storage.local.get(['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM']);
+        (defaultTemplates as any).PLAN = bag.TPL_PLAN || (defaultTemplates as any).PLAN;
+        (defaultTemplates as any).HPI = bag.TPL_HPI || (defaultTemplates as any).HPI;
+        (defaultTemplates as any).ROS = bag.TPL_ROS || (defaultTemplates as any).ROS;
+        (defaultTemplates as any).EXAM = bag.TPL_EXAM || (defaultTemplates as any).EXAM;
+      } catch {}
+    })();
+  }, []);
+
   function sendInsert(text: string) {
     chrome.tabs
       .query({ active: true, lastFocusedWindow: true })
@@ -143,6 +157,8 @@ function AppInner() {
       speechSynthesis?.speak(utterance);
     } catch {}
   }
+
+  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
 
   async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
     if (!host) {
@@ -191,6 +207,10 @@ function AppInner() {
       .join(' ')
       .trim();
     const payload = text || '(empty)';
+    if (features.preview && !opts?.bypassGuard) {
+      setPendingInsert({ section, payload });
+      return;
+    }
     const strategy = await insertUsingMapping(field as any, payload);
     toast.push(`Insert ${section} via ${strategy}`);
     pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
@@ -980,6 +1000,41 @@ ${section.join(' ')}`;
 
   return (
     <div className="relative">
+      {pendingInsert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/30" />
+          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-3 space-y-2">
+            <div className="text-sm font-medium">Confirm insert → {pendingInsert.section}</div>
+            <div className="max-h-40 overflow-auto text-[12px] whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-2">
+              {pendingInsert.payload.slice(0, 1200)}
+              {pendingInsert.payload.length > 1200 ? '…' : ''}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                onClick={() => setPendingInsert(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
+                onClick={async () => {
+                  const field = profile?.[pendingInsert.section];
+                  if (field?.selector) {
+                    const strategy = await insertUsingMapping(field as any, pendingInsert.payload);
+                    toast.push(`Insert ${pendingInsert.section} via ${strategy}`);
+                    pushWsEvent(`audit: ${pendingInsert.section.toLowerCase()} inserted`);
+                    audit('insert_ok', { strategy, section: pendingInsert.section });
+                  }
+                  setPendingInsert(null);
+                }}
+              >
+                Insert
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {focusMode && <div aria-hidden className="fixed inset-0" style={{ background: 'rgba(10,14,22,0.28)', pointerEvents: 'none' }} />}
       <div className="min-h-screen" style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <main className="shadow-2xl border border-slate-200" style={panelStyle}>
@@ -1053,6 +1108,29 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
+                <div className="text-sm font-medium mt-3">Fallback Selectors</div>
+                <div className="text-[12px] text-slate-600">Optional comma‑separated selectors used if the primary mapping is missing.</div>
+                {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
+                  <div key={`fb-${sec}`} className="mt-1">
+                    <label className="block text-[12px] text-slate-600">{sec}</label>
+                    <input
+                      className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs"
+                      placeholder="e.g. #altId, textarea[name=notes]"
+                      defaultValue={(profile?.[sec] as any)?.fallbackSelectors?.join(', ') || ''}
+                      onBlur={async (e) => {
+                        try {
+                          const raw = e.target.value || '';
+                          const list = raw.split(',').map(s => s.trim()).filter(Boolean);
+                          const next = { ...(profile || {}) } as any;
+                          next[sec] = { ...(next[sec] || { section: sec }), fallbackSelectors: list };
+                          setProfile(next);
+                          if (host) await saveProfile(host, next);
+                          toast.push(`${sec} fallbacks saved`);
+                        } catch { toast.push('Save failed'); }
+                      }}
+                    />
+                  </div>
+                ))}
                 <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
                 <div className="text-sm font-medium mt-3">Templates</div>
                 <div className="grid grid-cols-2 gap-2">
@@ -1103,6 +1181,10 @@ ${section.join(' ')}`;
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={features.undo} onChange={(e) => saveFeatures({ ...features, undo: e.target.checked })} />
                     Undo last insert
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.preview} onChange={(e) => saveFeatures({ ...features, preview: e.target.checked })} />
+                    Preview before insert
                   </label>
                 </div>
               </div>
