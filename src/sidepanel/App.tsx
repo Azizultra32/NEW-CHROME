@@ -843,6 +843,7 @@ ${section.join(' ')}`;
         const fp = String(m.fp || '');
         if (lastFpRef.current && lastFpRef.current !== fp) {
           transcript.addBoundary(`patient context changed → ${m.preview}`);
+          try { await audit('context_changed', { preview: m.preview, fp }); } catch {}
         }
         lastFpRef.current = fp || null;
       }
@@ -989,6 +990,7 @@ ${section.join(' ')}`;
                     onClick={async () => {
                       await confirmPatientFingerprint(pendingGuard.fp!, pendingGuard.preview);
                       pushWsEvent('guard: patient confirmed');
+                      try { await audit('patient_confirmed', { preview: pendingGuard.preview, fp: pendingGuard.fp }); } catch {}
                       setPendingGuard(null);
                       toast.push('Patient confirmed');
                       await onInsertPlan({ bypassGuard: true });
