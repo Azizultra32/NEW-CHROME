@@ -42,6 +42,8 @@ function AppInner() {
   const [pendingGuard, setPendingGuard] = useState<GuardStatus | null>(null);
   const lastFpRef = useRef<string | null>(null);
   const [liveWords, setLiveWords] = useState('');
+  const [pttActive, setPttActive] = useState(false);
+  const pttActiveRef = useRef(false);
 
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
@@ -516,9 +518,9 @@ function AppInner() {
     } catch { toast.push('Import failed'); }
   }, [host, toast]);
 
-  // Keyboard shortcuts: focus toggle + record toggle (Alt+R)
+  // Keyboard shortcuts: focus toggle + record toggle (Alt+R) + Push‑to‑Talk (Alt+Space)
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       const mac = navigator.platform.toUpperCase().includes('MAC');
       // Focus toggle: Cmd/Ctrl + `
       if ((mac ? e.metaKey : e.ctrlKey) && e.key === '`') {
@@ -534,9 +536,34 @@ function AppInner() {
         }
         return;
       }
+      // Push‑to‑Talk: hold Alt + Space to record only while held (panel must be focused)
+      if (e.altKey && e.code === 'Space') {
+        e.preventDefault();
+        if (!recordingRef.current && !busyRef.current && !pttActiveRef.current) {
+          pttActiveRef.current = true;
+          setPttActive(true);
+          onToggleRef.current(); // start
+        }
+        return;
+      }
     };
-    window.addEventListener('keydown', onKey, { passive: false });
-    return () => window.removeEventListener('keydown', onKey);
+    const onKeyUp = (e: KeyboardEvent) => {
+      // Release Push‑to‑Talk on Space keyup
+      if (e.code === 'Space' && pttActiveRef.current) {
+        e.preventDefault();
+        pttActiveRef.current = false;
+        setPttActive(false);
+        if (recordingRef.current && !busyRef.current) {
+          onToggleRef.current(); // stop
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, { passive: false });
+    window.addEventListener('keyup', onKeyUp, { passive: false });
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, []);
 
   const onMapFields = useCallback(async () => {
@@ -906,7 +933,7 @@ ${section.join(' ')}`;
             {(recording || wsState !== 'disconnected') && (
               <div className="rounded-md border border-slate-200 bg-white/90 px-2 py-1 text-[12px] text-slate-700" style={{maxHeight: 56, overflow: 'hidden'}}>
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2 align-middle" />
-                {liveWords || 'Listening…'}
+                {pttActive ? 'Push‑to‑talk active…' : (liveWords || 'Listening…')}
               </div>
             )}
             {settingsOpen && (
