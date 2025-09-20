@@ -32,41 +32,35 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
         {recording ? 'Stop' : 'Start'} Recording
       </button>
       <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${
-          recording ? 'hover:bg-slate-200' : disabledLook
-        }`}
-        title={recording ? 'Smart Paste (wired later)' : 'Start recording to enable'}
-        disabled={!recording}
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
+        title={'Insert into mapped PLAN field'}
         onClick={() => onInsertPlan?.()}
       >
         Insert Plan
       </button>
       {onInsertHPI && (
       <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
-        disabled={!recording}
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
         onClick={() => onInsertHPI?.()}
-        title={recording ? 'Insert HPI' : 'Start recording to enable'}
+        title={'Insert HPI'}
       >
         Insert HPI
       </button>
       )}
       {onInsertROS && (
       <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
-        disabled={!recording}
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
         onClick={() => onInsertROS?.()}
-        title={recording ? 'Insert ROS' : 'Start recording to enable'}
+        title={'Insert ROS'}
       >
         Insert ROS
       </button>
       )}
       {onInsertEXAM && (
       <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
-        disabled={!recording}
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
         onClick={() => onInsertEXAM?.()}
-        title={recording ? 'Insert EXAM' : 'Start recording to enable'}
+        title={'Insert EXAM'}
       >
         Insert EXAM
       </button>
