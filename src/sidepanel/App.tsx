@@ -53,27 +53,47 @@ function AppInner() {
   };
 
   // Feature flags to mitigate risk and allow quick disable
-  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true, preview: false });
+  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true, preview: false, autoBackup: true, tplPerHost: true });
   useEffect(() => {
     (async () => {
       try {
-        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI','FEAT_PREVIEW']);
+        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI','FEAT_PREVIEW','FEAT_AUTO_BACKUP','FEAT_TPL_PER_HOST']);
         setFeatures({
           templates: bag.FEA_TEMPLATES ?? bag.FEAT_TEMPLATES ?? true,
           undo: bag.FEA_UNDO ?? bag.FEAT_UNDO ?? true,
           multi: bag.FEA_MULTI ?? bag.FEAT_MULTI ?? true,
-          preview: bag.FEA_PREVIEW ?? bag.FEAT_PREVIEW ?? false
+          preview: bag.FEA_PREVIEW ?? bag.FEAT_PREVIEW ?? false,
+          autoBackup: bag.FEA_AUTO_BACKUP ?? bag.FEAT_AUTO_BACKUP ?? true,
+          tplPerHost: bag.FEA_TPL_PER_HOST ?? bag.FEAT_TPL_PER_HOST ?? true
         });
       } catch {}
     })();
   }, []);
-  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean }) => {
+  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean; autoBackup: boolean; tplPerHost: boolean }) => {
     try {
-      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview });
+      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview, FEAT_AUTO_BACKUP: next.autoBackup, FEAT_TPL_PER_HOST: next.tplPerHost });
       setFeatures(next);
       toast.push('Features updated');
     } catch { toast.push('Failed to update features'); }
   }, [toast]);
+
+  // Local recovery snapshot to storage
+  const backupTimerRef = useRef<number | null>(null);
+  const scheduleBackup = useCallback(() => {
+    if (!features.autoBackup) return;
+    if (backupTimerRef.current) window.clearTimeout(backupTimerRef.current);
+    backupTimerRef.current = window.setTimeout(async () => {
+      try {
+        const bag = await chrome.storage.local.get(null);
+        const keep = Object.keys(bag).filter((k) => (
+          k === 'API_BASE' || k.startsWith('MAP_') || k.startsWith('TPL_') || k.startsWith('FEAT_') || k === 'ASSIST_CONFIRMED_FP'
+        ));
+        const snapshot: any = { ts: Date.now(), version: 1, data: {} };
+        keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
+        await chrome.storage.local.set({ ASSIST_BACKUP_SNAPSHOT_V1: snapshot });
+      } catch {}
+    }, 400);
+  }, [features.autoBackup]);
 
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
@@ -127,18 +147,22 @@ function AppInner() {
     }).catch(() => {});
   }, []);
 
-  // Load saved templates on mount to honor user customizations without manual click
+  // Load templates (host-scoped if enabled), fallback to global
   useEffect(() => {
     (async () => {
       try {
-        const bag = await chrome.storage.local.get(['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM']);
-        (defaultTemplates as any).PLAN = bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-        (defaultTemplates as any).HPI = bag.TPL_HPI || (defaultTemplates as any).HPI;
-        (defaultTemplates as any).ROS = bag.TPL_ROS || (defaultTemplates as any).ROS;
-        (defaultTemplates as any).EXAM = bag.TPL_EXAM || (defaultTemplates as any).EXAM;
+        const keys = ['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM'];
+        if (features.tplPerHost && host) {
+          keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
+        }
+        const bag = await chrome.storage.local.get(keys);
+        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
+        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
+        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
+        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
       } catch {}
     })();
-  }, []);
+  }, [features.tplPerHost, host]);
 
   function sendInsert(text: string) {
     chrome.tabs
@@ -159,6 +183,8 @@ function AppInner() {
   }
 
   const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
+
+  const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
 
   async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
     if (!host) {
@@ -195,8 +221,8 @@ function AppInner() {
     const verify = await verifyTarget(field as any);
     if (!verify.ok) {
       const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
-      toast.push(`${reason}. Remap the ${section} field and try again.`);
       setLastError(reason);
+      setRemapPrompt({ section });
       return;
     }
 
@@ -216,6 +242,7 @@ function AppInner() {
     pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
     audit('insert_ok', { strategy, section });
     setLastError(null);
+    scheduleBackup();
   }
 
   const COMMAND_COOLDOWN_MS = 1000;
@@ -1032,6 +1059,34 @@ ${section.join(' ')}`;
 
   return (
     <div className="relative">
+      {remapPrompt && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm space-y-2">
+          <div className="font-medium">{remapPrompt.section} field missing or not editable</div>
+          <div className="flex gap-2">
+            <button
+              className="px-2 py-1 text-xs rounded-md bg-amber-600 text-white"
+              onClick={async () => {
+                try {
+                  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+                  const tab = tabs[0];
+                  if (tab?.id) {
+                    try { await chrome.tabs.sendMessage(tab.id, { type: 'MAP_MODE', on: true, section: remapPrompt.section }); }
+                    catch {
+                      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+                      await chrome.tabs.sendMessage(tab.id, { type: 'MAP_MODE', on: true, section: remapPrompt.section });
+                    }
+                  }
+                  toast.push(`Click a ${remapPrompt.section} field to map`);
+                } catch {}
+                setRemapPrompt(null);
+              }}
+            >
+              Remap now
+            </button>
+            <button className="px-2 py-1 text-xs rounded-md border border-amber-400" onClick={() => setRemapPrompt(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
       {pendingInsert && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/30" />
@@ -1172,6 +1227,7 @@ ${section.join(' ')}`;
                           setProfile(next);
                           if (host) await saveProfile(host, next);
                           toast.push(`${sec} fallbacks saved`);
+                          scheduleBackup();
                         } catch { toast.push('Save failed'); }
                       }}
                     />
@@ -1188,10 +1244,11 @@ ${section.join(' ')}`;
                         const next = window.prompt(`Edit ${sec} template`, cur);
                         if (next === null) return;
                         try {
-                          const key = `TPL_${sec}`;
+                          const key = (features.tplPerHost && host) ? `TPL_${host}_${sec}` : `TPL_${sec}`;
                           await chrome.storage.local.set({ [key]: next });
                           (defaultTemplates as any)[sec] = next;
                           toast.push(`${sec} template saved`);
+                          scheduleBackup();
                         } catch { toast.push('Save failed'); }
                       }}
                     >
@@ -1202,11 +1259,13 @@ ${section.join(' ')}`;
                     className="px-2 py-1 text-xs rounded-md border border-slate-300 col-span-2"
                     onClick={async () => {
                       try {
-                        const bag = await chrome.storage.local.get(['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM']);
-                        (defaultTemplates as any).PLAN = bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-                        (defaultTemplates as any).HPI = bag.TPL_HPI || (defaultTemplates as any).HPI;
-                        (defaultTemplates as any).ROS = bag.TPL_ROS || (defaultTemplates as any).ROS;
-                        (defaultTemplates as any).EXAM = bag.TPL_EXAM || (defaultTemplates as any).EXAM;
+                        const keys = ['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM'];
+                        if (features.tplPerHost && host) keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
+                        const bag = await chrome.storage.local.get(keys);
+                        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
+                        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
+                        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
+                        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
                         toast.push('Templates loaded');
                       } catch { toast.push('Load failed'); }
                     }}
@@ -1231,6 +1290,14 @@ ${section.join(' ')}`;
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={features.preview} onChange={(e) => saveFeatures({ ...features, preview: e.target.checked })} />
                     Preview before insert
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.autoBackup} onChange={(e) => saveFeatures({ ...features, autoBackup: e.target.checked })} />
+                    Auto backup settings (local snapshot)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.tplPerHost} onChange={(e) => saveFeatures({ ...features, tplPerHost: e.target.checked })} />
+                    Templates per host
                   </label>
                 </div>
               </div>
