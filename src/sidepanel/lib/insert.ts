@@ -205,7 +205,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
   if (!tabId) return 'fail';
   const execResult = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (sel: string, value: string, path?: number[]) => {
+    func: (sel: string, value: string, path?: number[], fallbacks?: string[]) => {
       let w: Window & typeof globalThis = window;
       try {
         if (Array.isArray(path) && path.length) {
@@ -213,7 +213,9 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
         }
       } catch { return 'fail'; }
       const doc = w?.document || document;
-      const el = (doc.querySelector(sel) as any) || null;
+      const selectors = [sel].concat(Array.isArray(fallbacks) ? fallbacks : []);
+      let el: any = null;
+      for (const s of selectors) { el = (doc.querySelector(s) as any) || null; if (el) break; }
       if (!el) return 'fail';
       // ContentEditable: prefer Range insertion, fallback to execCommand
       if (el.isContentEditable) {
@@ -289,7 +291,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
       }
       return 'fail';
     },
-    args: [mapping.selector, text, mapping.framePath]
+    args: [mapping.selector, text, mapping.framePath, mapping.fallbackSelectors]
   }).catch(() => null);
 
   const directResult = execResult?.[0]?.result as Strategy | 'fail' | undefined;
@@ -377,11 +379,13 @@ export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult>
   if (!tabId) return { ok: false, reason: 'missing' };
   const res = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (sel: string, path?: number[]) => {
+    func: (sel: string, path?: number[], fallbacks?: string[]) => {
       let w: Window & typeof globalThis = window;
       try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return { ok: false, reason: 'missing' } as any; }
       const doc = w?.document || document;
-      const el = (doc.querySelector(sel) as any) || null;
+      const selectors = [sel].concat(Array.isArray(fallbacks) ? fallbacks : []);
+      let el: any = null;
+      for (const s of selectors) { el = (doc.querySelector(s) as any) || null; if (el) break; }
       if (!el) return { ok: false, reason: 'missing' } as any;
       // Compute editability for inputs/textarea and contenteditable targets
       const isFormField = 'value' in el;
@@ -393,7 +397,7 @@ export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult>
       if (disabled || readonlyAttr) return { ok: false, reason: 'not_editable' } as any;
       return { ok: true } as any;
     },
-    args: [mapping.selector, mapping.framePath]
+    args: [mapping.selector, mapping.framePath, mapping.fallbackSelectors]
   }).catch(() => null);
   const out = (res && res[0] && res[0].result) as VerifyResult | undefined;
   return out || { ok: false, reason: 'missing' };

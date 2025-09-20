@@ -154,16 +154,7 @@ function AppInner() {
       }
     }
     // Verify target exists and editable
-    const verify = await verifyTarget({
-      section,
-      selector: field.selector,
-      strategy: field.strategy,
-      verified: field.verified,
-      framePath: field.framePath,
-      target: (field as any).target,
-      popupUrlPattern: (field as any).popupUrlPattern,
-      popupTitleIncludes: (field as any).popupTitleIncludes
-    } as any);
+    const verify = await verifyTarget(field as any);
     if (!verify.ok) {
       const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
       toast.push(`${reason}. Remap the ${section} field and try again.`);
@@ -178,9 +169,7 @@ function AppInner() {
       .join(' ')
       .trim();
     const payload = text || '(empty)';
-    const strategy = (field as any).target === 'popup'
-      ? await insertUsingMapping(field as any, payload)
-      : await insertTextInto(field.selector, payload, field.framePath);
+    const strategy = await insertUsingMapping(field as any, payload);
     toast.push(`Insert ${section} via ${strategy}`);
     pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
     audit('insert_ok', { strategy, section });
@@ -314,9 +303,7 @@ function AppInner() {
     const verify = await verifyTarget(field as any);
     if (!verify.ok) { toast.push('Not editable or missing'); return; }
     const payload = defaultTemplates[section] || '(template)';
-    const strategy = (field as any).target === 'popup'
-      ? await insertUsingMapping(field as any, payload)
-      : await insertTextInto(field.selector, payload, field.framePath);
+    const strategy = await insertUsingMapping(field as any, payload);
     toast.push(`Template ${section} via ${strategy}`);
   }
 
@@ -1042,8 +1029,42 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
-                <div className="text-[12px] text-slate-500">
-                  After updating the API base, reload the EHR page and start again.
+                <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
+                <div className="text-sm font-medium mt-3">Templates</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
+                    <button key={sec}
+                      className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                      onClick={async () => {
+                        const cur = defaultTemplates[sec];
+                        const next = window.prompt(`Edit ${sec} template`, cur);
+                        if (next === null) return;
+                        try {
+                          const key = `TPL_${sec}`;
+                          await chrome.storage.local.set({ [key]: next });
+                          (defaultTemplates as any)[sec] = next;
+                          toast.push(`${sec} template saved`);
+                        } catch { toast.push('Save failed'); }
+                      }}
+                    >
+                      Edit {sec}
+                    </button>
+                  ))}
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300 col-span-2"
+                    onClick={async () => {
+                      try {
+                        const bag = await chrome.storage.local.get(['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM']);
+                        (defaultTemplates as any).PLAN = bag.TPL_PLAN || (defaultTemplates as any).PLAN;
+                        (defaultTemplates as any).HPI = bag.TPL_HPI || (defaultTemplates as any).HPI;
+                        (defaultTemplates as any).ROS = bag.TPL_ROS || (defaultTemplates as any).ROS;
+                        (defaultTemplates as any).EXAM = bag.TPL_EXAM || (defaultTemplates as any).EXAM;
+                        toast.push('Templates loaded');
+                      } catch { toast.push('Load failed'); }
+                    }}
+                  >
+                    Load Saved Templates
+                  </button>
                 </div>
               </div>
             )}
