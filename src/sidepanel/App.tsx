@@ -843,7 +843,7 @@ ${section.join(' ')}`;
         const fp = String(m.fp || '');
         if (lastFpRef.current && lastFpRef.current !== fp) {
           transcript.addBoundary(`patient context changed → ${m.preview}`);
-          try { await audit('context_changed', { preview: m.preview, fp }); } catch {}
+          try { audit('context_changed', { preview: m.preview, fp }); } catch {}
         }
         lastFpRef.current = fp || null;
       }

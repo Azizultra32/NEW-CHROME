@@ -91,10 +91,31 @@ async function resolveTargetTabId(mapping?: FieldMapping): Promise<number | null
   if ((!candidates || candidates.length === 0) && mapping.popupTitleIncludes) {
     candidates = tabs.filter((t) => (t.title || '').toLowerCase().includes(mapping.popupTitleIncludes!.toLowerCase()));
   }
-  // Prefer the most recently active candidate (descending by lastAccessed when available)
-  const tab = (candidates && candidates.length)
-    ? candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
-    : null;
+  // If multiple candidates, prompt user to choose; else prefer most recent
+  let tab = null as (typeof tabs[number]) | null;
+  if (candidates && candidates.length > 1) {
+    try {
+      const list = candidates
+        .slice()
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+        .map((t, i) => `${i + 1}) ${t.title || '(untitled)'} — ${t.url || ''}`)
+        .join('\n');
+      const choiceStr = prompt(`Multiple editor windows found. Choose target by number:\n\n${list}\n\nEnter number:`);
+      const idx = choiceStr ? (parseInt(choiceStr, 10) - 1) : -1;
+      if (idx >= 0 && idx < candidates.length) {
+        // keep same ordering used for display
+        const ordered = candidates.slice().sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+        tab = ordered[idx] || null;
+      }
+    } catch {
+      // fall through to most recent
+    }
+  }
+  if (!tab) {
+    tab = (candidates && candidates.length)
+      ? candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
+      : null;
+  }
   if (!tab?.id) return null;
   try {
     await chrome.tabs.update(tab.id, { active: true });
