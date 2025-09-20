@@ -86,7 +86,12 @@ function AppInner() {
       try {
         const bag = await chrome.storage.local.get(null);
         const keep = Object.keys(bag).filter((k) => (
-          k === 'API_BASE' || k.startsWith('MAP_') || k.startsWith('TPL_') || k.startsWith('FEAT_') || k === 'ASSIST_CONFIRMED_FP'
+          k === 'API_BASE' ||
+          k.startsWith('MAP_') ||
+          k.startsWith('TPL_') ||
+          k.startsWith('FEAT_') ||
+          k === 'ASSIST_CONFIRMED_FP' ||
+          k === 'ASSISTMD_LAST_TRANSCRIPT_V1'
         ));
         const snapshot: any = { ts: Date.now(), version: 1, data: {} };
         keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
@@ -639,7 +644,12 @@ function AppInner() {
     try {
       const bag = await chrome.storage.local.get(null);
       const keep = Object.keys(bag).filter((k) => (
-        k === 'API_BASE' || k.startsWith('MAP_') || k.startsWith('TPL_') || k.startsWith('FEAT_') || k === 'ASSIST_CONFIRMED_FP'
+        k === 'API_BASE' ||
+        k.startsWith('MAP_') ||
+        k.startsWith('TPL_') ||
+        k.startsWith('FEAT_') ||
+        k === 'ASSIST_CONFIRMED_FP' ||
+        k === 'ASSISTMD_LAST_TRANSCRIPT_V1'
       ));
       const snapshot: any = { ts: Date.now(), version: 1, data: {} };
       keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
