@@ -37,6 +37,13 @@ export async function insertTextInto(selector: string, text: string, framePath?:
               range.selectNodeContents(el);
               range.collapse(false);
             }
+            // Snapshot for undo
+            try {
+              (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+                kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+                htmlBefore: el.innerHTML
+              };
+            } catch {}
             // Insert text node
             const node = doc.createTextNode(value);
             range.deleteContents();
@@ -50,6 +57,13 @@ export async function insertTextInto(selector: string, text: string, framePath?:
           }
         } catch {}
         const ok = (doc as Document).execCommand('insertText', false, value);
+        try {
+          // Fallback snapshot after execCommand — approximate
+          (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+            kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+            htmlBefore: el.innerHTML
+          };
+        } catch {}
         return ok ? 'execCommand' : 'fail';
       }
       // Input/Textarea: insert at caret, preserve selection and dispatch input
@@ -64,6 +78,13 @@ export async function insertTextInto(selector: string, text: string, framePath?:
           const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value?.length || 0);
           const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : (el.value?.length || 0);
           const src = String(el.value ?? '');
+          // Snapshot for undo
+          try {
+            (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+              kind: 'value', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+              valueBefore: src, selectionStart: start, selectionEnd: end
+            };
+          } catch {}
           const before = src.slice(0, start);
           const after = src.slice(end);
           const next = before + value + after;
@@ -76,6 +97,12 @@ export async function insertTextInto(selector: string, text: string, framePath?:
           return 'value';
         } catch {
           // Fallback to replace-all behavior
+          try {
+            (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+              kind: 'value', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+              valueBefore: String(el.value ?? ''), selectionStart: 0, selectionEnd: 0
+            };
+          } catch {}
           el.value = value;
           el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
           return 'value';
@@ -201,6 +228,12 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
               range.selectNodeContents(el);
               range.collapse(false);
             }
+            try {
+              (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+                kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+                htmlBefore: el.innerHTML
+              };
+            } catch {}
             const node = doc.createTextNode(value);
             range.deleteContents();
             range.insertNode(node);
@@ -212,6 +245,12 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
           }
         } catch {}
         const ok = (doc as Document).execCommand('insertText', false, value);
+        try {
+          (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+            kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+            htmlBefore: el.innerHTML
+          };
+        } catch {}
         return ok ? 'execCommand' : 'fail';
       }
       // Input/Textarea: caret-aware insertion
@@ -226,6 +265,12 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
           const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value?.length || 0);
           const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : (el.value?.length || 0);
           const src = String(el.value ?? '');
+          try {
+            (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+              kind: 'value', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+              valueBefore: src, selectionStart: start, selectionEnd: end
+            };
+          } catch {}
           const before = src.slice(0, start);
           const after = src.slice(end);
           const next = before + value + after;
@@ -265,6 +310,64 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
   }).catch(() => {});
 
   return 'clipboard';
+}
+
+// Undo last insert in the active tab using snapshot captured during insert.
+export async function undoLastInsert(): Promise<boolean> {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id) return false;
+  const res = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => {
+      const w: any = window as any;
+      const snap = w.__ASSIST_LAST_INSERT_SNAPSHOT;
+      if (!snap) return false;
+      // Navigate to frame of snapshot
+      let ctx: any = window;
+      try {
+        if (Array.isArray(snap.framePath) && snap.framePath.length) {
+          for (const i of snap.framePath) { ctx = ctx.frames[i]; if (!ctx) break; }
+        }
+      } catch {}
+      const doc = ctx?.document || document;
+      const el: any = doc.querySelector(snap.selector);
+      if (!el) return false;
+      if (snap.kind === 'value') {
+        try {
+          el.focus();
+          el.value = snap.valueBefore || '';
+          if (typeof el.setSelectionRange === 'function') {
+            const s = typeof snap.selectionStart === 'number' ? snap.selectionStart : 0;
+            const e = typeof snap.selectionEnd === 'number' ? snap.selectionEnd : s;
+            try { el.setSelectionRange(s, e); } catch {}
+          }
+          el.dispatchEvent(new (ctx as any).Event('input', { bubbles: true }));
+          w.__ASSIST_LAST_INSERT_SNAPSHOT = null;
+          return true;
+        } catch { return false; }
+      }
+      if (snap.kind === 'ce') {
+        try {
+          el.focus();
+          el.innerHTML = snap.htmlBefore || '';
+          // Place caret at end
+          const sel = (ctx.getSelection && ctx.getSelection()) || (doc as any).getSelection?.();
+          if (sel) {
+            const range = doc.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          w.__ASSIST_LAST_INSERT_SNAPSHOT = null;
+          return true;
+        } catch { return false; }
+      }
+      return false;
+    }
+  }).catch(() => null);
+  const ok = !!(res && res[0] && res[0].result);
+  return ok;
 }
 
 export type VerifyResult = { ok: true } | { ok: false; reason: 'missing' | 'not_editable' };

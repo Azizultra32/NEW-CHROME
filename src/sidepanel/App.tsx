@@ -9,7 +9,7 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping, verifyTarget } from './lib/insert';
+import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
@@ -44,6 +44,13 @@ function AppInner() {
   const [liveWords, setLiveWords] = useState('');
   const [pttActive, setPttActive] = useState(false);
   const pttActiveRef = useRef(false);
+
+  const defaultTemplates: Record<Section, string> = {
+    PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
+    HPI: `Chief Complaint: \nHistory of Present Illness: \n`,
+    ROS: `Review of Systems: Negative except as noted above.`,
+    EXAM: `Physical Exam:\n- General: \n- HEENT: \n- Heart: \n- Lungs: \n- Abdomen: \n- Extremities: \n- Neuro: \n`
+  };
 
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
@@ -274,6 +281,23 @@ function AppInner() {
         if (intent.section === 'ros') await onInsert('ROS');
         if (intent.section === 'exam') await onInsert('EXAM');
         break;
+      case 'template':
+        speak(`${intent.section} template inserted`);
+        setCommandFeedback(`Command: template ${intent.section}`);
+        if (intent.section === 'plan') await onInsertTemplate('PLAN');
+        if (intent.section === 'hpi') await onInsertTemplate('HPI');
+        if (intent.section === 'ros') await onInsertTemplate('ROS');
+        if (intent.section === 'exam') await onInsertTemplate('EXAM');
+        break;
+      case 'undo':
+        setCommandFeedback('Command: undo');
+        try {
+          const ok = await undoLastInsert();
+          toastRef.current?.push(ok ? 'Undo applied' : 'Nothing to undo');
+        } catch {
+          toastRef.current?.push('Undo failed');
+        }
+        break;
       default:
         // No-op
         break;
@@ -282,6 +306,18 @@ function AppInner() {
     pushWsEvent(`command: ${intent.name}`);
     setCommandLog((prev) => [`${new Date().toLocaleTimeString()} · ${intent.name}`, ...prev].slice(0, 5));
     commandCooldownRef.current = now + COMMAND_COOLDOWN_MS;
+  }
+
+  async function onInsertTemplate(section: Section) {
+    const field = profile?.[section];
+    if (!host || !field?.selector) { toast.push(`Map ${section} first`); return; }
+    const verify = await verifyTarget(field as any);
+    if (!verify.ok) { toast.push('Not editable or missing'); return; }
+    const payload = defaultTemplates[section] || '(template)';
+    const strategy = (field as any).target === 'popup'
+      ? await insertUsingMapping(field as any, payload)
+      : await insertTextInto(field.selector, payload, field.framePath);
+    toast.push(`Template ${section} via ${strategy}`);
   }
 
   useEffect(() => () => {
@@ -1044,6 +1080,13 @@ ${section.join(' ')}`;
               busy={busy}
               onToggleRecord={onToggleRecord}
               onInsertPlan={() => onInsert('PLAN')}
+              onInsertHPI={() => onInsert('HPI')}
+              onInsertROS={() => onInsert('ROS')}
+              onInsertEXAM={() => onInsert('EXAM')}
+              onUndo={async () => {
+                const ok = await undoLastInsert();
+                toast.push(ok ? 'Undo applied' : 'Nothing to undo');
+              }}
               onCopyTranscript={onCopyTranscript}
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
