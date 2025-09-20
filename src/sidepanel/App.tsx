@@ -222,6 +222,9 @@ function AppInner() {
   function speak(text: string) {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
+      try { commandMuteUntilRef.current = Math.max(commandMuteUntilRef.current, Date.now() + 800); } catch {}
+      utterance.onstart = () => { try { commandMuteUntilRef.current = Date.now() + 1200; } catch {} };
+      utterance.onend = () => { try { commandMuteUntilRef.current = Date.now(); } catch {} };
       speechSynthesis?.speak(utterance);
     } catch {}
   }
@@ -1290,6 +1293,24 @@ ${section.join(' ')}`;
                   </button>
                   <button
                     className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => {
+                      try {
+                        const report = {
+                          ts: Date.now(),
+                          host,
+                          wsState,
+                          features,
+                          keys: Object.keys(await chrome.storage.local.get(null)),
+                        };
+                        await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+                        toast.push('Debug report copied');
+                      } catch { toast.push('Copy failed'); }
+                    }}
+                  >
+                    Copy Debug Report
+                  </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
                     onClick={() => setSettingsOpen(false)}
                   >
                     Close
@@ -1319,6 +1340,22 @@ ${section.join(' ')}`;
                     />
                   </div>
                 ))}
+                <div className="mt-2 flex gap-2">
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => {
+                      try {
+                        if (!host) { toast.push('No host'); return; }
+                        await chrome.storage.local.remove([`MAP_${host}`]);
+                        setProfile({} as any);
+                        toast.push('Host mappings cleared');
+                        scheduleBackup();
+                      } catch { toast.push('Clear failed'); }
+                    }}
+                  >
+                    Clear Host Mappings
+                  </button>
+                </div>
                 <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
                 <div className="text-sm font-medium mt-3">Templates</div>
                 <div className="grid grid-cols-2 gap-2">
