@@ -1,23 +1,28 @@
-# Acceptance — Golden Path
+# Acceptance Checklist — AssistMD Extension
 
-## Panel loads
-- Load unpacked (dist/)
-- Click toolbar icon → panel opens (or popup fallback)
-- Panel devtools: no 404/CSP; Tailwind styles visible
+Golden path
+- Toolbar click opens Side Panel; no console errors.
+- Start Recording → mic prompt → live partials < 1 s.
+- Voice: say "assist insert plan" → action ≤ 500 ms; no command text in transcript.
+- Switch chart mid‑session → insert blocked until confirm → confirm → allowed; boundary marker appears.
 
-## Record & stream
-- Start Recording → grant mic
-- Speak 10–20s → WS frames (hello/ack/partial) visible
-- Partial lines appear < 1 s
+Smart Paste V2
+- Map PLAN on page (textarea) → Insert succeeds; reports strategy.
+- Map PLAN in same‑origin iframe → Insert succeeds into iframe.
+- Map PLAN in popup editor → Insert succeeds; if multiple popups open, chooser appears and selection works.
 
-## Voice commands
-- Say “assist insert plan” → action ≤ 500 ms
-- Command audio NOT present in transcript
+Verify / Remap
+- If mapped field missing/not editable → verify blocks insert and prompts to remap.
 
-## Wrong-chart
-- Start on Patient A → switch to B
-- Insert → blocked; confirm → allowed; audit event (no PHI)
+Export / Import
+- Export mappings JSON; clear and Import restores mappings.
 
-## Smart Paste V2
-- Map HPI/Plan on dummy page; Insert succeeds
-- contenteditable & same-origin iframe pass
+Mock backend
+- `node server.js` logs: presign requests, ASR WS messages, audit events `insert_ok`, `insert_blocked`, `context_changed`, `patient_confirmed`.
+
+Quick setup
+1) `npm ci && npm run build`
+2) Load `dist/` in chrome://extensions (Developer Mode).
+3) `node server.js`
+4) Open `dist/ehr-test.html` and validate page/iframe; open "Plan Popup" and validate popup flow.
+
