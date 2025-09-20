@@ -142,6 +142,10 @@ function AppInner() {
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
 
+  // Ensure content script is present in active content tab when panel is open
+  // (defined later, after getContentTab)
+  let ensureContentScript: () => Promise<void>;
+
   // Load last transcript from storage on mount
   useEffect(() => {
     transcript.loadFromStorage().then((ok) => {
@@ -583,6 +587,19 @@ function AppInner() {
     return first ?? null;
   }, []);
 
+  // Now that getContentTab is declared, define ensureContentScript and run once
+  ensureContentScript = async () => {
+    try {
+      const tab = await getContentTab();
+      if (tab?.id) {
+        try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
+        catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
+      }
+    } catch {}
+  };
+
+  useEffect(() => { ensureContentScript?.(); }, [getContentTab]);
+
   // Capture active tab host & load mapping profile
   useEffect(() => {
     (async () => {
@@ -695,6 +712,12 @@ function AppInner() {
       if ((mac ? e.metaKey : e.ctrlKey) && e.key === '`') {
         setFocusMode((f) => !f);
         e.preventDefault();
+        return;
+      }
+      // Quick backup: Cmd/Ctrl + B
+      if ((mac ? e.metaKey : e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault();
+        (async () => { try { await onBackupAll(); } catch {} })();
         return;
       }
       // Record toggle: Alt + r
