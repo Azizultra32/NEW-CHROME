@@ -1439,6 +1439,27 @@ ${section.join(' ')}`;
                     Templates per host
                   </label>
                 </div>
+                <div className="text-sm font-medium mt-3">Shortcuts & Help</div>
+                <div className="text-[12px] text-slate-700 space-y-1">
+                  <div>• Cmd/Ctrl + ` — Toggle focus mode</div>
+                  <div>• Cmd/Ctrl + B — Download backup snapshot</div>
+                  <div>• Alt + R — Toggle recording</div>
+                  <div>• Alt + Space — Push‑to‑Talk (hold)</div>
+                  <div>• Voice: “assist insert plan”, “assist template plan”, “assist undo”</div>
+                  <div>
+                    <button
+                      className="mt-1 px-2 py-1 text-xs rounded-md border border-slate-300"
+                      onClick={async () => {
+                        try {
+                          const url = chrome.runtime.getURL('ehr-test.html');
+                          await chrome.tabs.create({ url });
+                        } catch {}
+                      }}
+                    >
+                      Open EHR Test Page
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
             {wsState === 'connecting' && (

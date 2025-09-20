@@ -16,13 +16,24 @@ Smart Paste V2
 Verify / Remap
 - If mapped field missing/not editable → verify blocks insert and prompts to remap.
  - If primary selector missing, fallbackSelectors are tried before failing.
+ - "Remap now" CTA opens Map Mode for the requested section.
 
 Export / Import
 - Export mappings JSON; clear and Import restores mappings.
 
- Templates
+Templates
  - Settings → Edit PLAN/HPI/ROS/EXAM template → save; "Load Saved Templates" restores values after reload.
  - Voice: "assist template ros" inserts ROS template; undo reverts.
+ - Templates per host: when enabled, keys `TPL_<HOST>_<SECTION>` override global.
+
+Recovery
+ - Auto‑backup writes `ASSIST_BACKUP_SNAPSHOT_V1` on changes; transcript included.
+ - On fresh profile with snapshot present → banner "Recovery snapshot found" → Restore Now applies settings and transcript.
+ - Settings → Recovery → Force Restore Snapshot + Download Latest Snapshot. Cmd/Ctrl+B downloads snapshot.
+
+Safety / Permissions
+ - Content script is injected programmatically as needed; no persistent `<all_urls>` content script.
+ - Command window suppression prevents command phrases from entering transcript; WS monitor: "partial: suppressed (command window)".
 
 Mock backend
 - `node server.js` logs: presign requests, ASR WS messages, audit events `insert_ok`, `insert_blocked`, `context_changed`, `patient_confirmed`.
