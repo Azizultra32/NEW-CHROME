@@ -55,17 +55,10 @@
       o.addEventListener('click', (e)=>{
         if (!mapping) return;
         e.preventDefault(); e.stopPropagation();
-        // Temporarily hide overlay to hit-test underlying element
-        const prev = o.style.display;
-        o.style.display = 'none';
-        const picked = pickAtPoint(window, e.clientX, e.clientY);
-        o.style.display = prev || 'block';
-        if (!picked) return;
-        const { selector, framePath } = picked;
-        const href = location && location.href || '';
-        const title = document && document.title || '';
-        const isPopup = (window === window.top) && !!window.opener;
-        safeSend({ type:'MAP_PICK', section: currentSection, selector, framePath, href, title, isPopup });
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el) return;
+        const sel = computeSelector(el);
+        safeSend({ type:'MAP_PICK', section: currentSection, selector: sel });
         toggle(false);
       }, true);
     }
@@ -80,47 +73,6 @@
     }
     const cls = (el.className||'').toString().trim().split(/\s+/).filter(Boolean).slice(0,3).join('.');
     return cls ? `${el.tagName.toLowerCase()}.${cls}` : el.tagName.toLowerCase();
-  }
-
-  // Traverse same-origin iframe chain at a point to compute selector + framePath
-  function pickAtPoint(rootWindow, clientX, clientY){
-    /** @type {number[]} */
-    const path = [];
-    let w = rootWindow;
-    let x = clientX;
-    let y = clientY;
-    try {
-      while (true) {
-        const el = w.document.elementFromPoint(x, y);
-        if (!el) return null;
-        if (el.tagName === 'IFRAME') {
-          // Only traverse same-origin frames
-          const ifr = /** @type {HTMLIFrameElement} */ (el);
-          let cw;
-          try { cw = ifr.contentWindow; } catch { break; }
-          if (!cw) break;
-          // Find index of this frame in parent frames
-          let idx = -1;
-          for (let i = 0; i < w.frames.length; i++) {
-            if (w.frames[i] === cw) { idx = i; break; }
-          }
-          if (idx === -1) break;
-          path.push(idx);
-          const r = ifr.getBoundingClientRect();
-          x = x - r.left;
-          y = y - r.top;
-          w = cw;
-          continue;
-        }
-        // Found target element in current window
-        const selector = computeSelector(el);
-        return { selector, framePath: path.slice(0) };
-      }
-    } catch {}
-    // Fallback to top-level element under point
-    const el = rootWindow.document.elementFromPoint(clientX, clientY);
-    if (!el) return null;
-    return { selector: computeSelector(el), framePath: [] };
   }
   chrome.runtime.onMessage.addListener((m)=>{
     if (!extAlive()) return;

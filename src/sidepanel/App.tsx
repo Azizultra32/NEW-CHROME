@@ -9,7 +9,7 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
+import { insertTextInto } from './lib/insert';
 import { isDevelopmentBuild } from './lib/env';
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
@@ -40,65 +40,7 @@ function AppInner() {
   const [commandMessage, setCommandMessage] = useState(BASE_COMMAND_MESSAGE);
   const commandMessageResetRef = useRef<number | null>(null);
   const [pendingGuard, setPendingGuard] = useState<GuardStatus | null>(null);
-  const lastFpRef = useRef<string | null>(null);
   const [liveWords, setLiveWords] = useState('');
-  const [pttActive, setPttActive] = useState(false);
-  const pttActiveRef = useRef(false);
-
-  const defaultTemplates: Record<Section, string> = {
-    PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
-    HPI: `Chief Complaint: \nHistory of Present Illness: \n`,
-    ROS: `Review of Systems: Negative except as noted above.`,
-    EXAM: `Physical Exam:\n- General: \n- HEENT: \n- Heart: \n- Lungs: \n- Abdomen: \n- Extremities: \n- Neuro: \n`
-  };
-
-  // Feature flags to mitigate risk and allow quick disable
-  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true, preview: false, autoBackup: true, tplPerHost: true });
-  useEffect(() => {
-    (async () => {
-      try {
-        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI','FEAT_PREVIEW','FEAT_AUTO_BACKUP','FEAT_TPL_PER_HOST']);
-        setFeatures({
-          templates: bag.FEA_TEMPLATES ?? bag.FEAT_TEMPLATES ?? true,
-          undo: bag.FEA_UNDO ?? bag.FEAT_UNDO ?? true,
-          multi: bag.FEA_MULTI ?? bag.FEAT_MULTI ?? true,
-          preview: bag.FEA_PREVIEW ?? bag.FEAT_PREVIEW ?? false,
-          autoBackup: bag.FEA_AUTO_BACKUP ?? bag.FEAT_AUTO_BACKUP ?? true,
-          tplPerHost: bag.FEA_TPL_PER_HOST ?? bag.FEAT_TPL_PER_HOST ?? true
-        });
-      } catch {}
-    })();
-  }, []);
-  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean; autoBackup: boolean; tplPerHost: boolean }) => {
-    try {
-      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview, FEAT_AUTO_BACKUP: next.autoBackup, FEAT_TPL_PER_HOST: next.tplPerHost });
-      setFeatures(next);
-      toast.push('Features updated');
-    } catch { toast.push('Failed to update features'); }
-  }, [toast]);
-
-  // Local recovery snapshot to storage
-  const backupTimerRef = useRef<number | null>(null);
-  const scheduleBackup = useCallback(() => {
-    if (!features.autoBackup) return;
-    if (backupTimerRef.current) window.clearTimeout(backupTimerRef.current);
-    backupTimerRef.current = window.setTimeout(async () => {
-      try {
-        const bag = await chrome.storage.local.get(null);
-        const keep = Object.keys(bag).filter((k) => (
-          k === 'API_BASE' ||
-          k.startsWith('MAP_') ||
-          k.startsWith('TPL_') ||
-          k.startsWith('FEAT_') ||
-          k === 'ASSIST_CONFIRMED_FP' ||
-          k === 'ASSISTMD_LAST_TRANSCRIPT_V1'
-        ));
-        const snapshot: any = { ts: Date.now(), version: 1, data: {} };
-        keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
-        await chrome.storage.local.set({ ASSIST_BACKUP_SNAPSHOT_V1: snapshot });
-      } catch {}
-    }, 400);
-  }, [features.autoBackup]);
 
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
@@ -118,95 +60,16 @@ function AppInner() {
     setWsEvents((prev) => [msg, ...prev].slice(0, 5));
   };
 
-  // Local audit helper (mock server)
-  const audit = useCallback(async (type: string, extra?: any) => {
-    try {
-      const base = apiBase || 'http://localhost:8080';
-      await fetch(`${base}/v1/audit`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, ts: Date.now(), extra })
-      }).catch(() => {});
-    } catch {}
-  }, [apiBase]);
-
   const recordingRef = useRef(recording);
   const busyRef = useRef(busy);
   const onToggleRef = useRef(onToggleRecord);
   const toastRef = useRef(toast);
   const commandCooldownRef = useRef(0);
-  const commandMuteUntilRef = useRef(0);
-  const lastPartialIntentRef = useRef<{ name: string; until: number } | null>(null);
-  const processedMessageIds = useRef<Set<string>>(new Set());
-  const messageIdCleanupRef = useRef<number | null>(null);
-
-  // Recovery snapshot state
-  const [snapshotInfo, setSnapshotInfo] = useState<{ ts: number; keys: string[] } | null>(null);
-  const [recoveryBanner, setRecoveryBanner] = useState(false);
 
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
-
-  // Ensure content script is present in active content tab when panel is open
-  // (defined later, after getContentTab)
-  let ensureContentScript: () => Promise<void>;
-
-  // Load last transcript from storage on mount
-  useEffect(() => {
-    transcript.loadFromStorage().then((ok) => {
-      if (ok) {
-        try { toast.push('Loaded last transcript'); } catch {}
-      }
-    }).catch(() => {});
-  }, []);
-
-  // Detect recovery snapshot and surface banner if mappings missing
-  useEffect(() => {
-    (async () => {
-      try {
-        const all = await chrome.storage.local.get(null);
-        const snap = all?.ASSIST_BACKUP_SNAPSHOT_V1 as { ts?: number; data?: Record<string, any> } | undefined;
-        if (snap && snap.data && typeof snap.data === 'object') {
-          const keys = Object.keys(snap.data);
-          setSnapshotInfo({ ts: Number(snap.ts || 0), keys });
-          const hasMappings = Object.keys(all).some((k) => k.startsWith('MAP_'));
-          // If no mappings present locally but snapshot exists → show banner
-          if (!hasMappings) setRecoveryBanner(true);
-        }
-      } catch {}
-    })();
-  }, []);
-
-  const forceRestoreSnapshot = useCallback(async () => {
-    try {
-      const all = await chrome.storage.local.get(['ASSIST_BACKUP_SNAPSHOT_V1']);
-      const snap = all?.ASSIST_BACKUP_SNAPSHOT_V1 as { data?: Record<string, any> } | undefined;
-      if (!snap || !snap.data || typeof snap.data !== 'object') { toast.push('No snapshot to restore'); return; }
-      await chrome.storage.local.set(snap.data);
-      toast.push('Snapshot restored. Reload the EHR page.');
-      setRecoveryBanner(false);
-    } catch {
-      toast.push('Snapshot restore failed');
-    }
-  }, [toast]);
-
-  // Load templates (host-scoped if enabled), fallback to global
-  useEffect(() => {
-    (async () => {
-      try {
-        const keys = ['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM'];
-        if (features.tplPerHost && host) {
-          keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
-        }
-        const bag = await chrome.storage.local.get(keys);
-        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
-        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
-        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
-      } catch {}
-    })();
-  }, [features.tplPerHost, host]);
 
   function sendInsert(text: string) {
     chrome.tabs
@@ -222,25 +85,18 @@ function AppInner() {
   function speak(text: string) {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
-      try { commandMuteUntilRef.current = Math.max(commandMuteUntilRef.current, Date.now() + 800); } catch {}
-      utterance.onstart = () => { try { commandMuteUntilRef.current = Date.now() + 1200; } catch {} };
-      utterance.onend = () => { try { commandMuteUntilRef.current = Date.now(); } catch {} };
       speechSynthesis?.speak(utterance);
     } catch {}
   }
 
-  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
-
-  const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
-
-  async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
+  async function onInsertPlan(opts?: { bypassGuard?: boolean }) {
     if (!host) {
       toast.push('No host context for mapping');
       return;
     }
-    const field = profile?.[section];
-    if (!field?.selector) {
-      toast.push(`Map ${section} field first`);
+    const planField = profile?.PLAN;
+    if (!planField?.selector) {
+      toast.push('Map PLAN field first');
       return;
     }
     if (!opts?.bypassGuard) {
@@ -256,7 +112,6 @@ function AppInner() {
           toast.push('Confirm patient before inserting');
           setLastError('Confirm patient before inserting');
           pushWsEvent('guard: insert blocked');
-          audit('insert_blocked', { reason: guard.reason, section });
           return;
         }
         toast.push('Patient guard error. Try again.');
@@ -264,35 +119,19 @@ function AppInner() {
         return;
       }
     }
-    // Verify target exists and editable
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) {
-      const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
-      setLastError(reason);
-      setRemapPrompt({ section });
-      return;
-    }
-
     const text = transcript
       .get()
       .filter((x) => !x.text.startsWith('[MOCK]'))
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const payload = text || '(empty)';
-    if (features.preview && !opts?.bypassGuard) {
-      setPendingInsert({ section, payload });
-      return;
-    }
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Insert ${section} via ${strategy}`);
-    pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
-    audit('insert_ok', { strategy, section });
+    const strategy = await insertTextInto(planField.selector, text || '(empty)');
+    toast.push(`Insert via ${strategy}`);
+    pushWsEvent('audit: plan inserted');
     setLastError(null);
-    scheduleBackup();
   }
 
-  const COMMAND_COOLDOWN_MS = 1000;
+  const COMMAND_COOLDOWN_MS = 1800;
 
   // Web Speech result path (hybrid fallback) — parses intent and runs command
   async function handleSRResult(event: any) {
@@ -323,14 +162,10 @@ function AppInner() {
   async function runCommand(intent: ReturnType<typeof parseIntent>) {
     if (!intent) return;
     const now = Date.now();
-    if (now < commandCooldownRef.current) {
-      pushWsEvent('command: blocked (cooldown)');
-      return;
-    }
+    if (now < commandCooldownRef.current) return;
 
     try {
       await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: COMMAND_COOLDOWN_MS });
-      commandMuteUntilRef.current = Date.now() + COMMAND_COOLDOWN_MS + 400; // add small padding
     } catch (err) {
       console.warn('[AssistMD] COMMAND_WINDOW dispatch failed', err);
     }
@@ -382,28 +217,10 @@ function AppInner() {
       case 'insert':
         speak(`${intent.section} noted`);
         setCommandFeedback(`Command: insert ${intent.section}`);
-        if (intent.section === 'plan') await onInsert('PLAN');
-        if (intent.section === 'hpi') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('HPI'); }
-        if (intent.section === 'ros') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('ROS'); }
-        if (intent.section === 'exam') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('EXAM'); }
-        break;
-      case 'template':
-        if (!features.templates) { toastRef.current?.push('Templates disabled'); break; }
-        speak(`${intent.section} template inserted`);
-        setCommandFeedback(`Command: template ${intent.section}`);
-        if (intent.section === 'plan') await onInsertTemplate('PLAN');
-        if (intent.section === 'hpi') await onInsertTemplate('HPI');
-        if (intent.section === 'ros') await onInsertTemplate('ROS');
-        if (intent.section === 'exam') await onInsertTemplate('EXAM');
-        break;
-      case 'undo':
-        if (!features.undo) { toastRef.current?.push('Undo disabled'); break; }
-        setCommandFeedback('Command: undo');
-        try {
-          const ok = await undoLastInsert();
-          toastRef.current?.push(ok ? 'Undo applied' : 'Nothing to undo');
-        } catch {
-          toastRef.current?.push('Undo failed');
+        if (intent.section === 'plan') {
+          await onInsertPlan();
+        } else {
+          toastRef.current?.push(`Insert ${intent.section.toUpperCase()} not wired yet`);
         }
         break;
       default:
@@ -414,16 +231,6 @@ function AppInner() {
     pushWsEvent(`command: ${intent.name}`);
     setCommandLog((prev) => [`${new Date().toLocaleTimeString()} · ${intent.name}`, ...prev].slice(0, 5));
     commandCooldownRef.current = now + COMMAND_COOLDOWN_MS;
-  }
-
-  async function onInsertTemplate(section: Section) {
-    const field = profile?.[section];
-    if (!host || !field?.selector) { toast.push(`Map ${section} first`); return; }
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) { toast.push('Not editable or missing'); return; }
-    const payload = defaultTemplates[section] || '(template)';
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Template ${section} via ${strategy}`);
   }
 
   useEffect(() => () => {
@@ -597,19 +404,6 @@ function AppInner() {
     return first ?? null;
   }, []);
 
-  // Now that getContentTab is declared, define ensureContentScript and run once
-  ensureContentScript = async () => {
-    try {
-      const tab = await getContentTab();
-      if (tab?.id) {
-        try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
-        catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
-      }
-    } catch {}
-  };
-
-  useEffect(() => { ensureContentScript?.(); }, [getContentTab]);
-
   // Capture active tab host & load mapping profile
   useEffect(() => {
     (async () => {
@@ -645,132 +439,17 @@ function AppInner() {
     }
   }, [apiBase, toast]);
 
-  const onBackupAll = useCallback(async () => {
-    try {
-      const bag = await chrome.storage.local.get(null);
-      const keep = Object.keys(bag).filter((k) => (
-        k === 'API_BASE' ||
-        k.startsWith('MAP_') ||
-        k.startsWith('TPL_') ||
-        k.startsWith('FEAT_') ||
-        k === 'ASSIST_CONFIRMED_FP' ||
-        k === 'ASSISTMD_LAST_TRANSCRIPT_V1'
-      ));
-      const snapshot: any = { ts: Date.now(), version: 1, data: {} };
-      keep.forEach((k) => { snapshot.data[k] = (bag as any)[k]; });
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'assistmd-backup.json'; a.click();
-      URL.revokeObjectURL(url);
-      toast.push('Backup downloaded');
-    } catch {
-      toast.push('Backup failed');
-    }
-  }, [toast]);
-
-  const onRestoreAll = useCallback(async (file: File) => {
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text || '{}');
-      const data = parsed?.data || parsed;
-      if (!data || typeof data !== 'object') { toast.push('Invalid backup file'); return; }
-      await chrome.storage.local.set(data);
-      toast.push('Backup restored. Reload the EHR page.');
-    } catch {
-      toast.push('Restore failed');
-    }
-  }, [toast]);
-
-  // Load API base on mount
+  // Keyboard toggle for focus
   useEffect(() => {
-    (async () => {
-      try {
-        const { API_BASE } = await chrome.storage.local.get(['API_BASE']);
-        if (API_BASE) setApiBase(API_BASE);
-      } catch {}
-    })();
-  }, []);
-
-  // Mapping export/import (per hostname)
-  const onExportMappings = useCallback(async () => {
-    if (!host) { toast.push('No host detected'); return; }
-    try {
-      const data = await loadProfile(host);
-      const blob = new Blob([JSON.stringify({ host, profile: data }, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `assistmd-mapping-${host}.json`; a.click();
-      URL.revokeObjectURL(url);
-      toast.push('Mappings exported');
-    } catch { toast.push('Export failed'); }
-  }, [host, toast]);
-
-  const onImportMappings = useCallback(async (file: File) => {
-    if (!host) { toast.push('No host detected'); return; }
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text || '{}');
-      const profileIn = parsed?.profile || parsed;
-      if (!profileIn || typeof profileIn !== 'object') { toast.push('Invalid mapping file'); return; }
-      await saveProfile(host, profileIn);
-      setProfile(profileIn);
-      toast.push('Mappings imported');
-    } catch { toast.push('Import failed'); }
-  }, [host, toast]);
-
-  // Keyboard shortcuts: focus toggle + record toggle (Alt+R) + Push‑to‑Talk (Alt+Space)
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
       const mac = navigator.platform.toUpperCase().includes('MAC');
-      // Focus toggle: Cmd/Ctrl + `
       if ((mac ? e.metaKey : e.ctrlKey) && e.key === '`') {
         setFocusMode((f) => !f);
         e.preventDefault();
-        return;
-      }
-      // Quick backup: Cmd/Ctrl + B
-      if ((mac ? e.metaKey : e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
-        e.preventDefault();
-        (async () => { try { await onBackupAll(); } catch {} })();
-        return;
-      }
-      // Record toggle: Alt + r
-      if (e.altKey && (e.key === 'r' || e.key === 'R')) {
-        e.preventDefault();
-        if (!busyRef.current) {
-          onToggleRef.current();
-        }
-        return;
-      }
-      // Push‑to‑Talk: hold Alt + Space to record only while held (panel must be focused)
-      if (e.altKey && e.code === 'Space') {
-        e.preventDefault();
-        if (!recordingRef.current && !busyRef.current && !pttActiveRef.current) {
-          pttActiveRef.current = true;
-          setPttActive(true);
-          onToggleRef.current(); // start
-        }
-        return;
       }
     };
-    const onKeyUp = (e: KeyboardEvent) => {
-      // Release Push‑to‑Talk on Space keyup
-      if (e.code === 'Space' && pttActiveRef.current) {
-        e.preventDefault();
-        pttActiveRef.current = false;
-        setPttActive(false);
-        if (recordingRef.current && !busyRef.current) {
-          onToggleRef.current(); // stop
-        }
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, { passive: false });
-    window.addEventListener('keyup', onKeyUp, { passive: false });
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-    };
+    window.addEventListener('keydown', onKey, { passive: false });
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   const onMapFields = useCallback(async () => {
@@ -781,13 +460,8 @@ function AppInner() {
     }
 
     try {
-      // Prompt for section to map (quick, non-blocking UI)
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: 'PLAN' });
+      toast.push('Click a PLAN field to map');
       return;
     } catch (primaryErr) {
       console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
@@ -798,12 +472,9 @@ function AppInner() {
         target: { tabId: activeTab.id },
         files: ['content.js']
       });
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
+
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: 'PLAN' });
+      toast.push('Click a PLAN field to map');
     } catch (fallbackErr) {
       console.error('MAP_MODE fallback failed', fallbackErr);
       toast.push('Unable to enter map mode — reload the EHR tab and try again.');
@@ -1020,30 +691,11 @@ ${section.join(' ')}`;
         }
       }
       if (m?.type === 'ASR_PARTIAL') {
-        // Check for message ID to prevent duplicates
-        if (m.id && processedMessageIds.current.has(m.id)) {
-          console.log('[AssistMD] Skipping duplicate message:', m.id);
-          return;
-        }
-        if (m.id) {
-          processedMessageIds.current.add(m.id);
-          // Clean up old IDs every 30 seconds
-          if (messageIdCleanupRef.current) clearTimeout(messageIdCleanupRef.current);
-          messageIdCleanupRef.current = window.setTimeout(() => {
-            processedMessageIds.current.clear();
-          }, 30000);
-        }
-        
         const txt = String(m.text || '');
         pushWsEvent(`partial: ${txt.slice(0, 30)}`);
         if (txt) {
           // Update live word feed (small UI strip)
           setLiveWords(txt);
-          // Suppress transcript additions during command mute window
-          if (Date.now() < commandMuteUntilRef.current) {
-            pushWsEvent('partial: suppressed (command window)');
-            return;
-          }
           // Wake on "assist …" directly from partials
           const low = txt.toLowerCase();
           const idx = low.indexOf('assist ');
@@ -1051,17 +703,8 @@ ${section.join(' ')}`;
             const tail = low.slice(idx + 'assist '.length).trim();
             const intent = parseIntent('assist ' + tail);
             if (intent) {
-              // De-duplicate repeated/overlapping partial triggers of the same intent
-              const now = Date.now();
-              const windowMs = 1800; // lockout window for identical intent names
-              const last = lastPartialIntentRef.current;
-              if (!last || last.name !== intent.name || now >= last.until) {
-                lastPartialIntentRef.current = { name: intent.name, until: now + windowMs };
-                // Run command and do not add this partial to transcript
-                runCommand(intent);
-              } else {
-                pushWsEvent(`command: suppressed duplicate (${intent.name})`);
-              }
+              // Run command and do not add this partial to transcript
+              runCommand(intent);
               return;
             }
           }
@@ -1074,35 +717,18 @@ ${section.join(' ')}`;
       }
       if (m?.type === 'MAP_PICK' && m.selector && m.section) {
         const next = { ...(profile || {}) };
-        const target: 'page' | 'iframe' | 'popup' = (Array.isArray(m.framePath) && m.framePath.length > 0)
-          ? 'iframe'
-          : (m.isPopup ? 'popup' : 'page');
-        // Derive a simple URL pattern for popups
-        const href: string = typeof m.href === 'string' ? m.href : '';
-        const urlPattern = href ? href.replace(/\?.*$/, '*') : undefined;
-        const titleIncl: string | undefined = typeof m.title === 'string' && m.title.length ? m.title.slice(0, 48) : undefined;
         next[m.section as Section] = {
           section: m.section,
           selector: m.selector,
           strategy: 'value',
-          verified: false,
-          framePath: Array.isArray(m.framePath) ? m.framePath : undefined,
-          target,
-          popupUrlPattern: target === 'popup' ? urlPattern : undefined,
-          popupTitleIncludes: target === 'popup' ? titleIncl : undefined
-        } as any;
+          verified: false
+        };
         setProfile(next);
         if (host) saveProfile(host, next);
         toast.push(`Mapped ${m.section} → ${m.selector}`);
       }
       if (m?.type === 'EHR_FP' && m.preview) {
         pushWsEvent(`fp: ${m.preview}`);
-        const fp = String(m.fp || '');
-        if (lastFpRef.current && lastFpRef.current !== fp) {
-          transcript.addBoundary(`patient context changed → ${m.preview}`);
-          try { audit('context_changed', { preview: m.preview, fp }); } catch {}
-        }
-        lastFpRef.current = fp || null;
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -1136,81 +762,6 @@ ${section.join(' ')}`;
 
   return (
     <div className="relative">
-      {recoveryBanner && snapshotInfo && (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900 px-3 py-2 text-sm flex items-center justify-between">
-          <div>
-            <span className="font-medium">Recovery snapshot found</span>
-            <span className="ml-2 text-emerald-800 text-[12px]">{new Date(snapshotInfo.ts || Date.now()).toLocaleString()}</span>
-          </div>
-          <div className="flex gap-2">
-            <button className="px-2 py-1 text-xs rounded-md border border-emerald-300" onClick={() => setRecoveryBanner(false)}>Dismiss</button>
-            <button className="px-2 py-1 text-xs rounded-md bg-emerald-600 text-white" onClick={forceRestoreSnapshot}>Restore Now</button>
-          </div>
-        </div>
-      )}
-      {remapPrompt && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm space-y-2">
-          <div className="font-medium">{remapPrompt.section} field missing or not editable</div>
-          <div className="flex gap-2">
-            <button
-              className="px-2 py-1 text-xs rounded-md bg-amber-600 text-white"
-              onClick={async () => {
-                try {
-                  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-                  const tab = tabs[0];
-                  if (tab?.id) {
-                    try { await chrome.tabs.sendMessage(tab.id, { type: 'MAP_MODE', on: true, section: remapPrompt.section }); }
-                    catch {
-                      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-                      await chrome.tabs.sendMessage(tab.id, { type: 'MAP_MODE', on: true, section: remapPrompt.section });
-                    }
-                  }
-                  toast.push(`Click a ${remapPrompt.section} field to map`);
-                } catch {}
-                setRemapPrompt(null);
-              }}
-            >
-              Remap now
-            </button>
-            <button className="px-2 py-1 text-xs rounded-md border border-amber-400" onClick={() => setRemapPrompt(null)}>Dismiss</button>
-          </div>
-        </div>
-      )}
-      {pendingInsert && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/30" />
-          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-3 space-y-2">
-            <div className="text-sm font-medium">Confirm insert → {pendingInsert.section}</div>
-            <div className="max-h-40 overflow-auto text-[12px] whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-2">
-              {pendingInsert.payload.slice(0, 1200)}
-              {pendingInsert.payload.length > 1200 ? '…' : ''}
-            </div>
-            <div className="flex gap-2 justify-end">
-              <button
-                className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                onClick={() => setPendingInsert(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
-                onClick={async () => {
-                  const field = profile?.[pendingInsert.section];
-                  if (field?.selector) {
-                    const strategy = await insertUsingMapping(field as any, pendingInsert.payload);
-                    toast.push(`Insert ${pendingInsert.section} via ${strategy}`);
-                    pushWsEvent(`audit: ${pendingInsert.section.toLowerCase()} inserted`);
-                    audit('insert_ok', { strategy, section: pendingInsert.section });
-                  }
-                  setPendingInsert(null);
-                }}
-              >
-                Insert
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {focusMode && <div aria-hidden className="fixed inset-0" style={{ background: 'rgba(10,14,22,0.28)', pointerEvents: 'none' }} />}
       <div className="min-h-screen" style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <main className="shadow-2xl border border-slate-200" style={panelStyle}>
@@ -1228,7 +779,7 @@ ${section.join(' ')}`;
             {(recording || wsState !== 'disconnected') && (
               <div className="rounded-md border border-slate-200 bg-white/90 px-2 py-1 text-[12px] text-slate-700" style={{maxHeight: 56, overflow: 'hidden'}}>
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2 align-middle" />
-                {pttActive ? 'Push‑to‑talk active…' : (liveWords || 'Listening…')}
+                {liveWords || 'Listening…'}
               </div>
             )}
             {settingsOpen && (
@@ -1241,7 +792,7 @@ ${section.join(' ')}`;
                   onChange={(e) => setApiBase(e.target.value)}
                   placeholder="https://api.your-domain.com"
                 />
-                <div className="flex gap-2 flex-wrap">
+                <div className="flex gap-2">
                   <button
                     className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                     onClick={saveApiBase}
@@ -1250,215 +801,13 @@ ${section.join(' ')}`;
                   </button>
                   <button
                     className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={onExportMappings}
-                  >
-                    Export Mappings
-                  </button>
-                  <label className="px-2 py-1 text-xs rounded-md border border-slate-300 cursor-pointer">
-                    Import
-                    <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onImportMappings(f);
-                      e.currentTarget.value = '';
-                    }} />
-                  </label>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={onBackupAll}
-                  >
-                    Backup All Settings
-                  </button>
-                  <label className="px-2 py-1 text-xs rounded-md border border-slate-300 cursor-pointer">
-                    Restore All
-                    <input type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onRestoreAll(f);
-                      e.currentTarget.value = '';
-                    }} />
-                  </label>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={async () => {
-                      const ok = await transcript.loadFromStorage().catch(() => false);
-                      toast.push(ok ? 'Transcript restored' : 'No saved transcript');
-                    }}
-                  >
-                    Load Last Transcript
-                  </button>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={() => { transcript.clear(); toast.push('Transcript cleared'); }}
-                  >
-                    Clear Transcript
-                  </button>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={async () => {
-                      try {
-                        const report = {
-                          ts: Date.now(),
-                          host,
-                          wsState,
-                          features,
-                          keys: Object.keys(await chrome.storage.local.get(null)),
-                        };
-                        await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
-                        toast.push('Debug report copied');
-                      } catch { toast.push('Copy failed'); }
-                    }}
-                  >
-                    Copy Debug Report
-                  </button>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
                     onClick={() => setSettingsOpen(false)}
                   >
                     Close
                   </button>
                 </div>
-                <div className="text-sm font-medium mt-3">Fallback Selectors</div>
-                <div className="text-[12px] text-slate-600">Optional comma‑separated selectors used if the primary mapping is missing.</div>
-                {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
-                  <div key={`fb-${sec}`} className="mt-1">
-                    <label className="block text-[12px] text-slate-600">{sec}</label>
-                    <input
-                      className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs"
-                      placeholder="e.g. #altId, textarea[name=notes]"
-                      defaultValue={(profile?.[sec] as any)?.fallbackSelectors?.join(', ') || ''}
-                      onBlur={async (e) => {
-                        try {
-                          const raw = e.target.value || '';
-                          const list = raw.split(',').map(s => s.trim()).filter(Boolean);
-                          const next = { ...(profile || {}) } as any;
-                          next[sec] = { ...(next[sec] || { section: sec }), fallbackSelectors: list };
-                          setProfile(next);
-                          if (host) await saveProfile(host, next);
-                          toast.push(`${sec} fallbacks saved`);
-                          scheduleBackup();
-                        } catch { toast.push('Save failed'); }
-                      }}
-                    />
-                  </div>
-                ))}
-                <div className="mt-2 flex gap-2">
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={async () => {
-                      try {
-                        if (!host) { toast.push('No host'); return; }
-                        await chrome.storage.local.remove([`MAP_${host}`]);
-                        setProfile({} as any);
-                        toast.push('Host mappings cleared');
-                        scheduleBackup();
-                      } catch { toast.push('Clear failed'); }
-                    }}
-                  >
-                    Clear Host Mappings
-                  </button>
-                </div>
-                <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
-                <div className="text-sm font-medium mt-3">Templates</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
-                    <button key={sec}
-                      className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                      onClick={async () => {
-                        const cur = defaultTemplates[sec];
-                        const next = window.prompt(`Edit ${sec} template`, cur);
-                        if (next === null) return;
-                        try {
-                          const key = (features.tplPerHost && host) ? `TPL_${host}_${sec}` : `TPL_${sec}`;
-                          await chrome.storage.local.set({ [key]: next });
-                          (defaultTemplates as any)[sec] = next;
-                          toast.push(`${sec} template saved`);
-                          scheduleBackup();
-                        } catch { toast.push('Save failed'); }
-                      }}
-                    >
-                      Edit {sec}
-                    </button>
-                  ))}
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300 col-span-2"
-                    onClick={async () => {
-                      try {
-                        const keys = ['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM'];
-                        if (features.tplPerHost && host) keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
-                        const bag = await chrome.storage.local.get(keys);
-                        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-                        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
-                        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
-                        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
-                        toast.push('Templates loaded');
-                      } catch { toast.push('Load failed'); }
-                    }}
-                  >
-                    Load Saved Templates
-                  </button>
-                </div>
-                <div className="text-sm font-medium mt-3">Recovery</div>
-                <div className="grid grid-cols-2 gap-2 text-[12px] text-slate-700">
-                  <div className="col-span-2">Latest snapshot: {snapshotInfo ? new Date(snapshotInfo.ts || Date.now()).toLocaleString() : 'none'}</div>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={forceRestoreSnapshot}
-                  >
-                    Force Restore Snapshot
-                  </button>
-                  <button
-                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                    onClick={onBackupAll}
-                  >
-                    Download Latest Snapshot
-                  </button>
-                </div>
-                <div className="text-sm font-medium mt-3">Feature Flags</div>
-                <div className="grid grid-cols-2 gap-2 text-[12px] text-slate-700">
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.multi} onChange={(e) => saveFeatures({ ...features, multi: e.target.checked })} />
-                    Multi‑section insert (HPI/ROS/EXAM)
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.templates} onChange={(e) => saveFeatures({ ...features, templates: e.target.checked })} />
-                    Templates
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.undo} onChange={(e) => saveFeatures({ ...features, undo: e.target.checked })} />
-                    Undo last insert
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.preview} onChange={(e) => saveFeatures({ ...features, preview: e.target.checked })} />
-                    Preview before insert
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.autoBackup} onChange={(e) => saveFeatures({ ...features, autoBackup: e.target.checked })} />
-                    Auto backup settings (local snapshot)
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={features.tplPerHost} onChange={(e) => saveFeatures({ ...features, tplPerHost: e.target.checked })} />
-                    Templates per host
-                  </label>
-                </div>
-                <div className="text-sm font-medium mt-3">Shortcuts & Help</div>
-                <div className="text-[12px] text-slate-700 space-y-1">
-                  <div>• Cmd/Ctrl + ` — Toggle focus mode</div>
-                  <div>• Cmd/Ctrl + B — Download backup snapshot</div>
-                  <div>• Alt + R — Toggle recording</div>
-                  <div>• Alt + Space — Push‑to‑Talk (hold)</div>
-                  <div>• Voice: “assist insert plan”, “assist template plan”, “assist undo”</div>
-                  <div>
-                    <button
-                      className="mt-1 px-2 py-1 text-xs rounded-md border border-slate-300"
-                      onClick={async () => {
-                        try {
-                          const url = chrome.runtime.getURL('ehr-test.html');
-                          await chrome.tabs.create({ url });
-                        } catch {}
-                      }}
-                    >
-                      Open EHR Test Page
-                    </button>
-                  </div>
+                <div className="text-[12px] text-slate-500">
+                  After updating the API base, reload the EHR page and start again.
                 </div>
               </div>
             )}
@@ -1494,14 +843,7 @@ ${section.join(' ')}`;
               recording={recording}
               busy={busy}
               onToggleRecord={onToggleRecord}
-              onInsertPlan={() => onInsert('PLAN')}
-              onInsertHPI={features.multi ? (() => onInsert('HPI')) : undefined}
-              onInsertROS={features.multi ? (() => onInsert('ROS')) : undefined}
-              onInsertEXAM={features.multi ? (() => onInsert('EXAM')) : undefined}
-              onUndo={features.undo ? (async () => {
-                const ok = await undoLastInsert();
-                toast.push(ok ? 'Undo applied' : 'Nothing to undo');
-              }) : undefined}
+              onInsertPlan={onInsertPlan}
               onCopyTranscript={onCopyTranscript}
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
@@ -1517,10 +859,9 @@ ${section.join(' ')}`;
                     onClick={async () => {
                       await confirmPatientFingerprint(pendingGuard.fp!, pendingGuard.preview);
                       pushWsEvent('guard: patient confirmed');
-                      try { await audit('patient_confirmed', { preview: pendingGuard.preview, fp: pendingGuard.fp }); } catch {}
                       setPendingGuard(null);
                       toast.push('Patient confirmed');
-                      await onInsert('PLAN', { bypassGuard: true });
+                      await onInsertPlan({ bypassGuard: true });
                     }}
                   >
                     Confirm patient
