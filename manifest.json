@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AssistMD",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ambient scribe + smart paste for physicians.",
   "action": { "default_title": "AssistMD" },
   "background": { "service_worker": "background.js" },
