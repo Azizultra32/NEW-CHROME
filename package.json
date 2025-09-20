@@ -9,10 +9,7 @@
     "build:clean": "npm run clean && npm run build",
     "setup": "npm ci && npm run build",
     "start": "node server.js",
-    "lint": "tsc --noEmit",
-    "dev": "node scripts/dev.mjs",
-    "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
-    "test:e2e": "playwright test || echo 'Playwright not installed in CI'"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -25,7 +22,6 @@
     "@types/chrome": "^0.0.270",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.5",
-    "@playwright/test": "^1.47.2",
     "autoprefixer": "^10.4.20",
     "esbuild": "^0.25.0",
     "postcss": "^8.4.41",

@@ -5,17 +5,13 @@ type Props = {
   busy: boolean;
   onToggleRecord: () => Promise<void> | void;
   onInsertPlan?: () => void;
-  onInsertHPI?: () => void;
-  onInsertROS?: () => void;
-  onInsertEXAM?: () => void;
-  onUndo?: () => void;
   onCopyTranscript?: () => void;
   transcriptFormat?: 'RAW' | 'SOAP' | 'APSO';
   onFormatChange?: (fmt: 'RAW' | 'SOAP' | 'APSO') => void;
   onMapFields?: () => void;
 };
 
-export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onInsertPlan, onInsertHPI, onInsertROS, onInsertEXAM, onUndo, onCopyTranscript, transcriptFormat = 'RAW', onFormatChange, onMapFields }) => {
+export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onInsertPlan, onCopyTranscript, transcriptFormat = 'RAW', onFormatChange, onMapFields }) => {
   const disabledLook = 'opacity-60 cursor-not-allowed';
   const canMapFields = typeof onMapFields === 'function';
 
@@ -32,39 +28,15 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
         {recording ? 'Stop' : 'Start'} Recording
       </button>
       <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
-        title={'Insert into mapped PLAN field'}
+        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${
+          recording ? 'hover:bg-slate-200' : disabledLook
+        }`}
+        title={recording ? 'Smart Paste (wired later)' : 'Start recording to enable'}
+        disabled={!recording}
         onClick={() => onInsertPlan?.()}
       >
         Insert Plan
       </button>
-      {onInsertHPI && (
-      <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
-        onClick={() => onInsertHPI?.()}
-        title={'Insert HPI'}
-      >
-        Insert HPI
-      </button>
-      )}
-      {onInsertROS && (
-      <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
-        onClick={() => onInsertROS?.()}
-        title={'Insert ROS'}
-      >
-        Insert ROS
-      </button>
-      )}
-      {onInsertEXAM && (
-      <button
-        className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 hover:bg-slate-200`}
-        onClick={() => onInsertEXAM?.()}
-        title={'Insert EXAM'}
-      >
-        Insert EXAM
-      </button>
-      )}
       <button
         className="rounded-lg px-3 py-2 font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 col-span-2"
         onClick={() => onCopyTranscript?.()}
@@ -92,14 +64,6 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Map Fields
       </button>
-      {onUndo && (
-        <button
-          className="rounded-lg px-3 py-2 font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 col-span-2"
-          onClick={() => onUndo?.()}
-        >
-          Undo Last Insert
-        </button>
-      )}
     </div>
   );
 };

@@ -6,9 +6,7 @@ export type Intent =
   | { name: 'bookmark' }
   | { name: 'newline' }
   | { name: 'timestamp' }
-  | { name: 'insert'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
-  | { name: 'template'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
-  | { name: 'undo' };
+  | { name: 'insert'; section: 'plan' | 'hpi' | 'ros' | 'exam' };
 
 export function parseIntent(raw: string): Intent | null {
   const s = normalize(raw);
@@ -30,11 +28,6 @@ export function parseIntent(raw: string): Intent | null {
   // Insert commands
   const m = rest.match(/^(insert|add) (plan|hpi|ros|exam)$/);
   if (m) return { name: 'insert', section: m[2] as any };
-  // Template commands
-  const t = rest.match(/^(template|insert template) (plan|hpi|ros|exam)$/);
-  if (t) return { name: 'template', section: t[2] as any };
-  // Undo
-  if (/^undo( insert)?$/.test(rest)) return { name: 'undo' };
   
   return null;
 }
