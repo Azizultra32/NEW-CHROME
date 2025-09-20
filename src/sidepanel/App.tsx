@@ -133,6 +133,10 @@ function AppInner() {
   const processedMessageIds = useRef<Set<string>>(new Set());
   const messageIdCleanupRef = useRef<number | null>(null);
 
+  // Recovery snapshot state
+  const [snapshotInfo, setSnapshotInfo] = useState<{ ts: number; keys: string[] } | null>(null);
+  const [recoveryBanner, setRecoveryBanner] = useState(false);
+
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
@@ -146,6 +150,36 @@ function AppInner() {
       }
     }).catch(() => {});
   }, []);
+
+  // Detect recovery snapshot and surface banner if mappings missing
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await chrome.storage.local.get(null);
+        const snap = all?.ASSIST_BACKUP_SNAPSHOT_V1 as { ts?: number; data?: Record<string, any> } | undefined;
+        if (snap && snap.data && typeof snap.data === 'object') {
+          const keys = Object.keys(snap.data);
+          setSnapshotInfo({ ts: Number(snap.ts || 0), keys });
+          const hasMappings = Object.keys(all).some((k) => k.startsWith('MAP_'));
+          // If no mappings present locally but snapshot exists → show banner
+          if (!hasMappings) setRecoveryBanner(true);
+        }
+      } catch {}
+    })();
+  }, []);
+
+  const forceRestoreSnapshot = useCallback(async () => {
+    try {
+      const all = await chrome.storage.local.get(['ASSIST_BACKUP_SNAPSHOT_V1']);
+      const snap = all?.ASSIST_BACKUP_SNAPSHOT_V1 as { data?: Record<string, any> } | undefined;
+      if (!snap || !snap.data || typeof snap.data !== 'object') { toast.push('No snapshot to restore'); return; }
+      await chrome.storage.local.set(snap.data);
+      toast.push('Snapshot restored. Reload the EHR page.');
+      setRecoveryBanner(false);
+    } catch {
+      toast.push('Snapshot restore failed');
+    }
+  }, [toast]);
 
   // Load templates (host-scoped if enabled), fallback to global
   useEffect(() => {
@@ -1059,6 +1093,18 @@ ${section.join(' ')}`;
 
   return (
     <div className="relative">
+      {recoveryBanner && snapshotInfo && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900 px-3 py-2 text-sm flex items-center justify-between">
+          <div>
+            <span className="font-medium">Recovery snapshot found</span>
+            <span className="ml-2 text-emerald-800 text-[12px]">{new Date(snapshotInfo.ts || Date.now()).toLocaleString()}</span>
+          </div>
+          <div className="flex gap-2">
+            <button className="px-2 py-1 text-xs rounded-md border border-emerald-300" onClick={() => setRecoveryBanner(false)}>Dismiss</button>
+            <button className="px-2 py-1 text-xs rounded-md bg-emerald-600 text-white" onClick={forceRestoreSnapshot}>Restore Now</button>
+          </div>
+        </div>
+      )}
       {remapPrompt && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm space-y-2">
           <div className="font-medium">{remapPrompt.section} field missing or not editable</div>
@@ -1271,6 +1317,22 @@ ${section.join(' ')}`;
                     }}
                   >
                     Load Saved Templates
+                  </button>
+                </div>
+                <div className="text-sm font-medium mt-3">Recovery</div>
+                <div className="grid grid-cols-2 gap-2 text-[12px] text-slate-700">
+                  <div className="col-span-2">Latest snapshot: {snapshotInfo ? new Date(snapshotInfo.ts || Date.now()).toLocaleString() : 'none'}</div>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={forceRestoreSnapshot}
+                  >
+                    Force Restore Snapshot
+                  </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={onBackupAll}
+                  >
+                    Download Latest Snapshot
                   </button>
                 </div>
                 <div className="text-sm font-medium mt-3">Feature Flags</div>
