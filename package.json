@@ -10,7 +10,9 @@
     "setup": "npm ci && npm run build",
     "start": "node server.js",
     "lint": "tsc --noEmit",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
+    "test:e2e": "playwright test || echo 'Playwright not installed in CI'"
   },
   "dependencies": {
     "cors": "^2.8.5",

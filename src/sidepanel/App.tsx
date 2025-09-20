@@ -134,6 +134,7 @@ function AppInner() {
   const onToggleRef = useRef(onToggleRecord);
   const toastRef = useRef(toast);
   const commandCooldownRef = useRef(0);
+  const commandMuteUntilRef = useRef(0);
   const lastPartialIntentRef = useRef<{ name: string; until: number } | null>(null);
   const processedMessageIds = useRef<Set<string>>(new Set());
   const messageIdCleanupRef = useRef<number | null>(null);
@@ -326,6 +327,7 @@ function AppInner() {
 
     try {
       await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: COMMAND_COOLDOWN_MS });
+      commandMuteUntilRef.current = Date.now() + COMMAND_COOLDOWN_MS + 400; // add small padding
     } catch (err) {
       console.warn('[AssistMD] COMMAND_WINDOW dispatch failed', err);
     }
@@ -1034,6 +1036,11 @@ ${section.join(' ')}`;
         if (txt) {
           // Update live word feed (small UI strip)
           setLiveWords(txt);
+          // Suppress transcript additions during command mute window
+          if (Date.now() < commandMuteUntilRef.current) {
+            pushWsEvent('partial: suppressed (command window)');
+            return;
+          }
           // Wake on "assist …" directly from partials
           const low = txt.toLowerCase();
           const idx = low.indexOf('assist ');
