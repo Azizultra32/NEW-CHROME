@@ -41,6 +41,7 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Insert Plan
       </button>
+      {onInsertHPI && (
       <button
         className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
         disabled={!recording}
@@ -49,6 +50,8 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Insert HPI
       </button>
+      )}
+      {onInsertROS && (
       <button
         className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
         disabled={!recording}
@@ -57,6 +60,8 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Insert ROS
       </button>
+      )}
+      {onInsertEXAM && (
       <button
         className={`rounded-lg px-3 py-2 font-medium bg-slate-100 text-slate-800 ${ recording ? 'hover:bg-slate-200' : disabledLook }`}
         disabled={!recording}
@@ -65,6 +70,7 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Insert EXAM
       </button>
+      )}
       <button
         className="rounded-lg px-3 py-2 font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 col-span-2"
         onClick={() => onCopyTranscript?.()}
@@ -92,12 +98,14 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
       >
         Map Fields
       </button>
-      <button
-        className="rounded-lg px-3 py-2 font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 col-span-2"
-        onClick={() => onUndo?.()}
-      >
-        Undo Last Insert
-      </button>
+      {onUndo && (
+        <button
+          className="rounded-lg px-3 py-2 font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 col-span-2"
+          onClick={() => onUndo?.()}
+        >
+          Undo Last Insert
+        </button>
+      )}
     </div>
   );
 };

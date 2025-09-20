@@ -52,6 +52,28 @@ function AppInner() {
     EXAM: `Physical Exam:\n- General: \n- HEENT: \n- Heart: \n- Lungs: \n- Abdomen: \n- Extremities: \n- Neuro: \n`
   };
 
+  // Feature flags to mitigate risk and allow quick disable
+  const [features, setFeatures] = useState({ templates: true, undo: true, multi: true });
+  useEffect(() => {
+    (async () => {
+      try {
+        const bag = await chrome.storage.local.get(['FEAT_TEMPLATES','FEAT_UNDO','FEAT_MULTI']);
+        setFeatures({
+          templates: bag.FEA_TEMPLATES ?? bag.FEAT_TEMPLATES ?? true,
+          undo: bag.FEA_UNDO ?? bag.FEAT_UNDO ?? true,
+          multi: bag.FEA_MULTI ?? bag.FEAT_MULTI ?? true
+        });
+      } catch {}
+    })();
+  }, []);
+  const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean }) => {
+    try {
+      await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi });
+      setFeatures(next);
+      toast.push('Features updated');
+    } catch { toast.push('Failed to update features'); }
+  }, [toast]);
+
   const setCommandFeedback = (msg: string, persist = false) => {
     if (commandMessageResetRef.current) {
       window.clearTimeout(commandMessageResetRef.current);
@@ -266,11 +288,12 @@ function AppInner() {
         speak(`${intent.section} noted`);
         setCommandFeedback(`Command: insert ${intent.section}`);
         if (intent.section === 'plan') await onInsert('PLAN');
-        if (intent.section === 'hpi') await onInsert('HPI');
-        if (intent.section === 'ros') await onInsert('ROS');
-        if (intent.section === 'exam') await onInsert('EXAM');
+        if (intent.section === 'hpi') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('HPI'); }
+        if (intent.section === 'ros') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('ROS'); }
+        if (intent.section === 'exam') { if (!features.multi) { toastRef.current?.push('Multi‑section insert disabled'); break; } await onInsert('EXAM'); }
         break;
       case 'template':
+        if (!features.templates) { toastRef.current?.push('Templates disabled'); break; }
         speak(`${intent.section} template inserted`);
         setCommandFeedback(`Command: template ${intent.section}`);
         if (intent.section === 'plan') await onInsertTemplate('PLAN');
@@ -279,6 +302,7 @@ function AppInner() {
         if (intent.section === 'exam') await onInsertTemplate('EXAM');
         break;
       case 'undo':
+        if (!features.undo) { toastRef.current?.push('Undo disabled'); break; }
         setCommandFeedback('Command: undo');
         try {
           const ok = await undoLastInsert();
@@ -1066,6 +1090,21 @@ ${section.join(' ')}`;
                     Load Saved Templates
                   </button>
                 </div>
+                <div className="text-sm font-medium mt-3">Feature Flags</div>
+                <div className="grid grid-cols-2 gap-2 text-[12px] text-slate-700">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.multi} onChange={(e) => saveFeatures({ ...features, multi: e.target.checked })} />
+                    Multi‑section insert (HPI/ROS/EXAM)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.templates} onChange={(e) => saveFeatures({ ...features, templates: e.target.checked })} />
+                    Templates
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={features.undo} onChange={(e) => saveFeatures({ ...features, undo: e.target.checked })} />
+                    Undo last insert
+                  </label>
+                </div>
               </div>
             )}
             {wsState === 'connecting' && (
@@ -1101,13 +1140,13 @@ ${section.join(' ')}`;
               busy={busy}
               onToggleRecord={onToggleRecord}
               onInsertPlan={() => onInsert('PLAN')}
-              onInsertHPI={() => onInsert('HPI')}
-              onInsertROS={() => onInsert('ROS')}
-              onInsertEXAM={() => onInsert('EXAM')}
-              onUndo={async () => {
+              onInsertHPI={features.multi ? (() => onInsert('HPI')) : undefined}
+              onInsertROS={features.multi ? (() => onInsert('ROS')) : undefined}
+              onInsertEXAM={features.multi ? (() => onInsert('EXAM')) : undefined}
+              onUndo={features.undo ? (async () => {
                 const ok = await undoLastInsert();
                 toast.push(ok ? 'Undo applied' : 'Nothing to undo');
-              }}
+              }) : undefined}
               onCopyTranscript={onCopyTranscript}
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
