@@ -133,6 +133,10 @@ function AppInner() {
   const busyRef = useRef(busy);
   const onToggleRef = useRef(onToggleRecord);
   const toastRef = useRef(toast);
+  const notifyError = useCallback((msg: string) => {
+    try { toast.push(msg); } catch {}
+    setLastError(msg);
+  }, [toast]);
   const commandCooldownRef = useRef(0);
   const commandMuteUntilRef = useRef(0);
   const lastPartialIntentRef = useRef<{ name: string; until: number } | null>(null);
@@ -234,10 +238,7 @@ function AppInner() {
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
 
   async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
-    if (!host) {
-      toast.push('No host context for mapping');
-      return;
-    }
+    if (!host) { notifyError('No host context for mapping'); return; }
     const field = profile?.[section];
     if (!field?.selector) {
       toast.push(`Map ${section} field first`);
@@ -246,32 +247,21 @@ function AppInner() {
     if (!opts?.bypassGuard) {
       const guard = await verifyPatientBeforeInsert();
       if (!guard.ok) {
-        if (guard.reason === 'missing') {
-          toast.push('No patient detected. View the chart before inserting.');
-          setLastError('Confirm patient before inserting');
-          return;
-        }
+        if (guard.reason === 'missing') { notifyError('No patient detected. View the chart before inserting.'); return; }
         if (guard.reason === 'unconfirmed' || guard.reason === 'mismatch') {
           setPendingGuard(guard);
-          toast.push('Confirm patient before inserting');
-          setLastError('Confirm patient before inserting');
+          notifyError('Confirm patient before inserting');
           pushWsEvent('guard: insert blocked');
           audit('insert_blocked', { reason: guard.reason, section });
           return;
         }
-        toast.push('Patient guard error. Try again.');
-        setLastError('Confirm patient before inserting');
+        notifyError('Patient guard error. Try again.');
         return;
       }
     }
     // Verify target exists and editable
     const verify = await verifyTarget(field as any);
-    if (!verify.ok) {
-      const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
-      setLastError(reason);
-      setRemapPrompt({ section });
-      return;
-    }
+    if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); return; }
 
     const text = transcript
       .get()
@@ -1457,6 +1447,17 @@ ${section.join(' ')}`;
                       }}
                     >
                       Open EHR Test Page
+                    </button>
+                    <button
+                      className="mt-1 ml-2 px-2 py-1 text-xs rounded-md border border-slate-300"
+                      onClick={async () => {
+                        try {
+                          const url = chrome.runtime.getURL('troubleshooting.html');
+                          await chrome.tabs.create({ url });
+                        } catch {}
+                      }}
+                    >
+                      Troubleshooting
                     </button>
                   </div>
                 </div>

@@ -60,6 +60,9 @@ async function copyStatic() {
   try {
     await cp(join(root, 'public', 'ehr-popup.html'), join(distDir, 'ehr-popup.html'));
   } catch {}
+  try {
+    await cp(join(root, 'public', 'troubleshooting.html'), join(distDir, 'troubleshooting.html'));
+  } catch {}
 }
 
 async function injectPanelHtml() {

@@ -9,7 +9,7 @@
   "permissions": ["storage", "scripting", "activeTab", "tabs", "offscreen"],
   "web_accessible_resources": [
     {
-      "resources": ["ehr-test.html", "ehr-popup.html"],
+      "resources": ["ehr-test.html", "ehr-popup.html", "troubleshooting.html"],
       "matches": ["<all_urls>"]
     }
   ],

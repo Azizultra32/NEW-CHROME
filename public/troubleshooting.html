@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>AssistMD Troubleshooting</title>
+<style>
+  body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #0f172a; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 16px; margin: 20px 0 8px; }
+  code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }
+  .tip { background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px 10px; border-radius: 8px; }
+</style>
+<h1>AssistMD Troubleshooting</h1>
+
+<h2>Microphone</h2>
+<div class="tip">
+If you see “Microphone blocked”, click the mic permission icon in Chrome’s URL bar and allow access. You can also enable it under Chrome → Settings → Privacy and security → Site settings → Microphone.
+</div>
+
+<h2>Iframes and Popups</h2>
+<div class="tip">
+Mapping inside same-origin iframes is supported. For popup editors, map the field while the popup is focused. Multiple popups are handled via a chooser.
+</div>
+
+<h2>Insert Blocked</h2>
+<div class="tip">
+If you see “Confirm patient before inserting”, click Confirm patient in the panel. Switching charts mid-session writes a boundary marker and requires confirmation again.
+</div>
+
+<h2>Content Script Not Active</h2>
+<div class="tip">
+If mapping doesn’t respond, reload the EHR tab. The extension programmatically injects its content script when needed. Use Settings → Map Fields again after reload.
+</div>
+
+<h2>Recovery</h2>
+<div class="tip">
+Settings → Recovery shows the latest snapshot. Use Force Restore Snapshot to rehydrate mappings, templates, flags, and transcript. Cmd/Ctrl+B downloads a backup.
+</div>
+
