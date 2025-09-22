@@ -81,4 +81,69 @@ test.describe('Extension smoke (MV3)', () => {
     const v = await web.evaluate(() => (document.querySelector('#e2ePlan') as HTMLTextAreaElement)?.value || '');
     expect(v.length).toBeGreaterThan(0);
   });
+
+  test('map + insert into same-origin iframe', async () => {
+    const web = await context.newPage();
+    await web.goto('https://example.com');
+    await web.evaluate(() => {
+      const iframe = document.createElement('iframe');
+      iframe.id = 'e2eFrame';
+      document.body.appendChild(iframe);
+      const doc = (iframe.contentWindow as any).document as Document;
+      doc.open();
+      doc.write(`<!doctype html><meta charset=\"utf-8\"><div id=\"e2eIframePlan\" contenteditable=\"true\">(frame)</div>`);
+      doc.close();
+    });
+
+    const panel = await context.newPage();
+    await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await panel.waitForLoadState('domcontentloaded');
+    await panel.evaluate(() => new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage({
+        type: 'MAP_PICK',
+        section: 'PLAN',
+        selector: '#e2eIframePlan',
+        framePath: [0],
+        href: location.href,
+        title: document.title,
+        isPopup: false
+      }, () => resolve());
+    }));
+
+    await panel.getByRole('button', { name: 'Insert Plan' }).click();
+    const inner = await web.evaluate(() => (document.querySelector('#e2eFrame') as HTMLIFrameElement).contentDocument?.querySelector('#e2eIframePlan')?.textContent || '');
+    expect(inner.length).toBeGreaterThan(0);
+  });
+
+  test('map + insert into popup window', async () => {
+    const popup = await context.newPage();
+    await popup.goto('about:blank');
+    await popup.evaluate(() => {
+      document.title = 'Plan Editor';
+      const ta = document.createElement('textarea');
+      ta.id = 'e2ePopupPlan';
+      document.body.appendChild(ta);
+    });
+
+    const panel = await context.newPage();
+    await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await panel.waitForLoadState('domcontentloaded');
+    const href = popup.url();
+    const title = await popup.title();
+    await panel.evaluate(([href, title]) => new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage({
+        type: 'MAP_PICK',
+        section: 'PLAN',
+        selector: '#e2ePopupPlan',
+        framePath: [],
+        href,
+        title,
+        isPopup: true
+      }, () => resolve());
+    }), [href, title]);
+
+    await panel.getByRole('button', { name: 'Insert Plan' }).click();
+    const v = await popup.evaluate(() => (document.querySelector('#e2ePopupPlan') as HTMLTextAreaElement)?.value || '');
+    expect(v.length).toBeGreaterThan(0);
+  });
 });
