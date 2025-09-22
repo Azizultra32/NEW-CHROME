@@ -10,6 +10,7 @@ import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
 import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
+import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
 const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
 
@@ -256,6 +257,7 @@ function AppInner() {
           notifyError('Confirm patient before inserting');
           pushWsEvent('guard: insert blocked');
           audit('insert_blocked', { reason: guard.reason, section });
+          telemetry.recordEvent('guard_blocked', { reason: guard.reason, section }).catch(() => {});
           return;
         }
         notifyError('Patient guard error. Try again.');
@@ -266,7 +268,7 @@ function AppInner() {
     // Ensure we can execute in the target tab
     await ensurePerms();
     const verify = await verifyTarget(field as any);
-    if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); return; }
+    if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); telemetry.recordEvent('verify_fail', { section, reason }).catch(() => {}); return; }
 
     const text = transcript
       .get()
@@ -279,12 +281,14 @@ function AppInner() {
       setPendingInsert({ section, payload });
       return;
     }
+    const t0 = Date.now();
     const strategy = await insertUsingMapping(field as any, payload);
     toast.push(`Insert ${section} via ${strategy}`);
     pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
     audit('insert_ok', { strategy, section });
     setLastError(null);
     scheduleBackup();
+    telemetry.recordLatency('insert_latency', Date.now() - t0, { section, strategy }).catch(() => {});
   }
 
   const COMMAND_COOLDOWN_MS = 1000;
@@ -1459,6 +1463,23 @@ ${section.join(' ')}`;
                     Templates per host
                   </label>
                 </div>
+                <div className="text-sm font-medium mt-3">Permissions</div>
+                <div className="text-[12px] text-slate-700">
+                  The extension requests access to the current site only when mapping or inserting. If denied, mapping and insert won’t work.
+                  <div className="mt-2 flex gap-2">
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={() => ensurePerms()}>Request Permissions</button>
+                  </div>
+                </div>
+                <div className="text-sm font-medium mt-3">Telemetry (local)</div>
+                <div className="text-[12px] text-slate-700">
+                  We store recent timing and outcome events locally to help debug (no network). You can export or clear them here.
+                  <div className="mt-2 flex gap-2">
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => {
+                      try { const blob = new Blob([await telemetry.exportTelemetry()], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'assistmd-telemetry.json'; a.click(); URL.revokeObjectURL(url); toast.push('Telemetry exported'); } catch { toast.push('Export failed'); }
+                    }}>Export Telemetry</button>
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => { await telemetry.clearTelemetry(); toast.push('Telemetry cleared'); }}>Clear Telemetry</button>
+                  </div>
+                </div>
                 <div className="text-sm font-medium mt-3">Shortcuts & Help</div>
                 <div className="text-[12px] text-slate-700 space-y-1">
                   <div>• Cmd/Ctrl + ` — Toggle focus mode</div>
@@ -1549,6 +1570,7 @@ ${section.join(' ')}`;
                       await confirmPatientFingerprint(pendingGuard.fp!, pendingGuard.preview);
                       pushWsEvent('guard: patient confirmed');
                       try { await audit('patient_confirmed', { preview: pendingGuard.preview, fp: pendingGuard.fp }); } catch {}
+                      telemetry.recordEvent('patient_confirmed', { fp: pendingGuard.fp }).catch(() => {});
                       setPendingGuard(null);
                       toast.push('Patient confirmed');
                       await onInsert('PLAN', { bypassGuard: true });
@@ -1562,6 +1584,7 @@ ${section.join(' ')}`;
                       setPendingGuard(null);
                       toast.push('Insert cancelled');
                       pushWsEvent('guard: insert cancelled');
+                      telemetry.recordEvent('insert_cancelled').catch(() => {});
                     }}
                   >
                     Cancel

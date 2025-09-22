@@ -27,13 +27,18 @@ Templates
  - Templates per host: when enabled, keys `TPL_<HOST>_<SECTION>` override global.
 
 Recovery
- - Auto‑backup writes `ASSIST_BACKUP_SNAPSHOT_V1` on changes; transcript included.
- - On fresh profile with snapshot present → banner "Recovery snapshot found" → Restore Now applies settings and transcript.
- - Settings → Recovery → Force Restore Snapshot + Download Latest Snapshot. Cmd/Ctrl+B downloads snapshot.
+- Auto‑backup writes `ASSIST_BACKUP_SNAPSHOT_V1` on changes; transcript included.
+- On fresh profile with snapshot present → banner "Recovery snapshot found" → Restore Now applies settings and transcript.
+- Settings → Recovery → Force Restore Snapshot + Download Latest Snapshot. Cmd/Ctrl+B downloads snapshot.
 
 Safety / Permissions
- - Content script is injected programmatically as needed; no persistent `<all_urls>` content script.
- - Command window suppression prevents command phrases from entering transcript; WS monitor: "partial: suppressed (command window)".
+- Content script is injected programmatically as needed; no persistent `<all_urls>` content script.
+- Command window suppression prevents command phrases from entering transcript; WS monitor: "partial: suppressed (command window)".
+ - Optional permissions: first map/insert requests `tabs` + `scripting` + current origin. Deny → error toast; Settings → Permissions → Request Permissions.
+
+ Telemetry (local)
+ - Insert latency logged; verify failures and guard actions recorded in local telemetry.
+ - Settings → Telemetry → Export/Clear works.
 
 Mock backend
 - `node server.js` logs: presign requests, ASR WS messages, audit events `insert_ok`, `insert_blocked`, `context_changed`, `patient_confirmed`.
