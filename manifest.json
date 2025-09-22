@@ -6,7 +6,9 @@
   "action": { "default_title": "AssistMD" },
   "background": { "service_worker": "background.js" },
   "side_panel": { "default_path": "sidepanel.html" },
-  "permissions": ["storage", "scripting", "activeTab", "tabs", "offscreen"],
+  "permissions": ["storage", "activeTab", "offscreen"],
+  "optional_permissions": ["scripting", "tabs"],
+  "optional_host_permissions": ["<all_urls>"],
   "web_accessible_resources": [
     {
       "resources": ["ehr-test.html", "ehr-popup.html", "troubleshooting.html"],

@@ -237,6 +237,9 @@ function AppInner() {
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
 
+  // Request on‑demand permissions for scripting/tabs and current origin when needed (defined after getContentTab)
+  let ensurePerms: () => Promise<boolean>;
+
   async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
     if (!host) { notifyError('No host context for mapping'); return; }
     const field = profile?.[section];
@@ -260,6 +263,8 @@ function AppInner() {
       }
     }
     // Verify target exists and editable
+    // Ensure we can execute in the target tab
+    await ensurePerms();
     const verify = await verifyTarget(field as any);
     if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); return; }
 
@@ -409,6 +414,7 @@ function AppInner() {
   async function onInsertTemplate(section: Section) {
     const field = profile?.[section];
     if (!host || !field?.selector) { toast.push(`Map ${section} first`); return; }
+    await ensurePerms();
     const verify = await verifyTarget(field as any);
     if (!verify.ok) { toast.push('Not editable or missing'); return; }
     const payload = defaultTemplates[section] || '(template)';
@@ -586,6 +592,28 @@ function AppInner() {
     const first = tabs.find((tab) => acceptable(tab.url));
     return first ?? null;
   }, []);
+
+  // Define ensurePerms now that getContentTab exists
+  ensurePerms = async () => {
+    try {
+      const tab = await getContentTab();
+      const url = tab?.url || '';
+      if (!url) return true;
+      const origin = (() => { try { return new URL(url).origin + '/*'; } catch { return ''; } })();
+      const contains = (chrome.permissions as any).contains?.bind(chrome.permissions) || (async () => false);
+      const request = (chrome.permissions as any).request?.bind(chrome.permissions) || (async () => false);
+      const has = await contains({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
+      if (has) return true;
+      const ok = await request({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
+      if (!ok) {
+        notifyError('Permissions denied. Enable permissions to map/insert.');
+        return false;
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  };
 
   // Now that getContentTab is declared, define ensureContentScript and run once
   ensureContentScript = async () => {
@@ -771,6 +799,7 @@ function AppInner() {
     }
 
     try {
+      await ensurePerms();
       // Prompt for section to map (quick, non-blocking UI)
       const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
       const section = (String(choice || 'PLAN').toUpperCase() as Section);
@@ -784,6 +813,7 @@ function AppInner() {
     }
 
     try {
+      await ensurePerms();
       await chrome.scripting.executeScript({
         target: { tabId: activeTab.id },
         files: ['content.js']
