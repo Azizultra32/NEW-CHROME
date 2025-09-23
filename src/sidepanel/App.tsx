@@ -237,6 +237,7 @@ function AppInner() {
   const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
+  const [permBanner, setPermBanner] = useState(false);
 
   // Request on‑demand permissions for scripting/tabs and current origin when needed (defined after getContentTab)
   let ensurePerms: () => Promise<boolean>;
@@ -611,8 +612,10 @@ function AppInner() {
       const ok = await request({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
       if (!ok) {
         notifyError('Permissions denied. Enable permissions to map/insert.');
+        setPermBanner(true);
         return false;
       }
+      setPermBanner(false);
       return true;
     } catch {
       return true;
@@ -1160,6 +1163,18 @@ ${section.join(' ')}`;
 
   return (
     <div className="relative">
+      {permBanner && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-sm flex items-center justify-between">
+          <div>
+            <span className="font-medium">Permissions needed</span>
+            <span className="ml-2 text-amber-800 text-[12px]">Grant access to this site to enable mapping and inserting.</span>
+          </div>
+          <div className="flex gap-2">
+            <button className="px-2 py-1 text-xs rounded-md border border-amber-300" onClick={() => setPermBanner(false)}>Dismiss</button>
+            <button className="px-2 py-1 text-xs rounded-md bg-amber-600 text-white" onClick={() => ensurePerms()}>Request</button>
+          </div>
+        </div>
+      )}
       {recoveryBanner && snapshotInfo && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900 px-3 py-2 text-sm flex items-center justify-between">
           <div>
@@ -1478,6 +1493,12 @@ ${section.join(' ')}`;
                       try { const blob = new Blob([await telemetry.exportTelemetry()], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'assistmd-telemetry.json'; a.click(); URL.revokeObjectURL(url); toast.push('Telemetry exported'); } catch { toast.push('Export failed'); }
                     }}>Export Telemetry</button>
                     <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => { await telemetry.clearTelemetry(); toast.push('Telemetry cleared'); }}>Clear Telemetry</button>
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => {
+                      try {
+                        const items = await telemetry.getRecent(10);
+                        alert('Recent telemetry (last 10):\n' + items.map(i => `${new Date(i.ts).toLocaleTimeString()} · ${i.name} ${i.data?JSON.stringify(i.data):''}`).join('\n'));
+                      } catch {}
+                    }}>Show Recent</button>
                   </div>
                 </div>
                 <div className="text-sm font-medium mt-3">Shortcuts & Help</div>
