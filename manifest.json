@@ -8,17 +8,10 @@
   "side_panel": { "default_path": "sidepanel.html" },
   "permissions": ["storage", "activeTab", "offscreen"],
   "optional_permissions": ["scripting", "tabs"],
-  "optional_host_permissions": ["<all_urls>"],
-  "web_accessible_resources": [
-    {
-      "resources": ["ehr-test.html", "ehr-popup.html", "troubleshooting.html"],
-      "matches": ["<all_urls>"]
-    }
-  ],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
-  },
-  
+  }
 }

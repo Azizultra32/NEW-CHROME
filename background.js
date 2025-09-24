@@ -1,5 +1,56 @@
 const TAG = 'BG';
 
+// Lightweight WS reconnection orchestrator (background-level)
+let asrActive = false;
+let lastEncounterId = null;
+let reconnectTimer = null;
+let reconnectDelayMs = 1000; // backoff up to 10s
+
+function clearReconnectTimer() {
+  try { if (reconnectTimer) clearTimeout(reconnectTimer); } catch {}
+  reconnectTimer = null;
+  reconnectDelayMs = 1000;
+}
+
+async function presign(encounterId) {
+  const API_BASE = await resolveApiBase();
+  const res = await fetch(`${API_BASE}/v1/encounters/${encounterId}/presign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'whisper' })
+  });
+  const text = await res.text();
+  const json = JSON.parse(text || '{}');
+  const { wssUrl, headers } = json || {};
+  return { ok: !!wssUrl, status: res.status, wssUrl, headers: headers || {} };
+}
+
+function scheduleReconnect(reason) {
+  if (!asrActive || !lastEncounterId) return;
+  if (reconnectTimer) return;
+  const delay = Math.min(10000, reconnectDelayMs);
+  console.log(`[${TAG}][ASR][RECONNECT] in ${delay}ms`, reason ? `(${reason})` : '');
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      const p = await presign(lastEncounterId);
+      if (p.ok && p.wssUrl) {
+        console.log(`[${TAG}][ASR][RECONNECT][PRESIGN_OK]`, p.status);
+        try { await chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: p.wssUrl, headers: p.headers }); } catch {}
+        reconnectDelayMs = 1000; // reset backoff on success
+      } else {
+        console.warn(`[${TAG}][ASR][RECONNECT][PRESIGN_FAIL] status=`, p.status);
+        reconnectDelayMs = Math.min(10000, reconnectDelayMs * 2);
+        scheduleReconnect('presign-failed');
+      }
+    } catch (e) {
+      console.warn(`[${TAG}][ASR][RECONNECT][ERR]`, String(e));
+      reconnectDelayMs = Math.min(10000, reconnectDelayMs * 2);
+      scheduleReconnect('presign-error');
+    }
+  }, delay);
+}
+
 async function resolveApiBase() {
   const fallback = (globalThis.__ASSIST_CONFIG__ && __ASSIST_CONFIG__.API_BASE) || 'http://localhost:8080';
   try {
@@ -42,6 +93,22 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
     return true;
   }
   (async () => {
+    // Passive status events from offscreen/clients — ack + react
+    if (msg?.type === 'ASR_WS_STATE') {
+      try {
+        if (msg.state === 'open') {
+          clearReconnectTimer();
+        }
+        if (msg.state === 'closed' || msg.state === 'error') {
+          // Let offscreen retry first; background will re-presign if needed
+          scheduleReconnect(msg.state);
+        }
+      } finally {
+        send({ ok: true });
+      }
+      return;
+    }
+
     if (msg?.type === 'START_CAPTURE') {
       console.log(`[${TAG}] START_CAPTURE`);
       try {
@@ -66,6 +133,9 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
       const API_BASE = await resolveApiBase();
       console.log(`[${TAG}][PRESIGN][REQ]`, { API_BASE, encounterId: msg.encounterId });
       try {
+        // Remember encounter for future reconnect attempts
+        lastEncounterId = msg.encounterId;
+        clearReconnectTimer();
         const res = await fetch(`${API_BASE}/v1/encounters/${msg.encounterId}/presign`, {
           method: 'POST',
           headers: {
@@ -87,6 +157,8 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
 
     if (msg?.type === 'ASR_CONNECT' && msg.wssUrl) {
       console.log(`[${TAG}][ASR_CONNECT]`, msg.wssUrl);
+      asrActive = true;
+      clearReconnectTimer();
       chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: msg.wssUrl }).catch(() => {});
       send({ ok: true });
       return;
@@ -94,6 +166,8 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
 
     if (msg?.type === 'ASR_DISCONNECT') {
       console.log(`[${TAG}][ASR_DISCONNECT]`);
+      asrActive = false;
+      clearReconnectTimer();
       chrome.runtime.sendMessage({ type: 'ASR_DISCONNECT' }).catch(() => {});
       send({ ok: true });
       return;

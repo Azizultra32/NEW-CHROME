@@ -27,9 +27,9 @@ export async function insertTextInto(selector: string, text: string, framePath?:
       if (el.isContentEditable) {
         try {
           el.focus();
-          const sel = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
-          if (sel && sel.rangeCount > 0) {
-            let range = sel.getRangeAt(0);
+          const selection = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
+          if (selection && selection.rangeCount > 0) {
+            let range = selection.getRangeAt(0);
             // Ensure range is within the editable element; if not, create a new range at the end
             const within = el.contains(range.startContainer);
             if (!within) {
@@ -51,8 +51,8 @@ export async function insertTextInto(selector: string, text: string, framePath?:
             // Move caret to end of inserted node
             range.setStartAfter(node);
             range.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(range);
+            selection.removeAllRanges();
+            selection.addRange(range);
             return 'execCommand';
           }
         } catch {}
@@ -221,9 +221,9 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
       if (el.isContentEditable) {
         try {
           el.focus();
-          const sel = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
-          if (sel && sel.rangeCount > 0) {
-            let range = sel.getRangeAt(0);
+          const selection = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
+          if (selection && selection.rangeCount > 0) {
+            let range = selection.getRangeAt(0);
             const within = el.contains(range.startContainer);
             if (!within) {
               range = doc.createRange();
@@ -241,8 +241,8 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
             range.insertNode(node);
             range.setStartAfter(node);
             range.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(range);
+            selection.removeAllRanges();
+            selection.addRange(range);
             return 'execCommand';
           }
         } catch {}

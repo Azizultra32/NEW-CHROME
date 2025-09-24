@@ -82,6 +82,27 @@ test.describe('Extension smoke (MV3)', () => {
     expect(v.length).toBeGreaterThan(0);
   });
 
+  test('preview-before-insert modal path', async () => {
+    const web = await context.newPage();
+    await web.goto('https://example.com');
+    await web.evaluate(() => { const t=document.createElement('textarea'); t.id='pvPlan'; document.body.appendChild(t); });
+    const panel = await context.newPage();
+    await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await panel.waitForLoadState('domcontentloaded');
+    // Enable preview flag
+    await panel.evaluate(() => chrome.storage.local.set({ FEAT_PREVIEW: true }));
+    // Map PLAN
+    await panel.evaluate(() => new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage({ type: 'MAP_PICK', section: 'PLAN', selector: '#pvPlan', framePath: [], href: location.href, title: document.title, isPopup: false }, () => resolve());
+    }));
+    // Click Insert Plan; confirm modal Insert
+    await panel.getByRole('button', { name: 'Insert Plan' }).click();
+    await panel.getByText('Confirm insert → PLAN').waitFor();
+    await panel.getByRole('button', { name: 'Insert' }).click();
+    const v = await web.evaluate(() => (document.querySelector('#pvPlan') as HTMLTextAreaElement)?.value || '');
+    expect(v.length).toBeGreaterThan(0);
+  });
+
   test('map + insert into same-origin iframe', async () => {
     const web = await context.newPage();
     await web.goto('https://example.com');
@@ -144,6 +165,33 @@ test.describe('Extension smoke (MV3)', () => {
 
     await panel.getByRole('button', { name: 'Insert Plan' }).click();
     const v = await popup.evaluate(() => (document.querySelector('#e2ePopupPlan') as HTMLTextAreaElement)?.value || '');
+    expect(v.length).toBeGreaterThan(0);
+  });
+
+  test('fallbackSelectors path works', async () => {
+    const web = await context.newPage();
+    await web.goto('https://example.com');
+    await web.evaluate(() => { const t=document.createElement('textarea'); t.id='e2eFallback'; document.body.appendChild(t); });
+    const panel = await context.newPage();
+    await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await panel.waitForLoadState('domcontentloaded');
+    // Map with a fake primary, then add fallback to storage
+    await panel.evaluate(() => new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage({ type: 'MAP_PICK', section: 'PLAN', selector: '#missing', framePath: [], href: location.href, title: document.title, isPopup: false }, () => resolve());
+    }));
+    // Update mapping in storage to include fallbackSelectors
+    await panel.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const u = tabs[0]?.url || '';
+      const host = u ? new URL(u).hostname : '';
+      const key = `MAP_${host}`;
+      const bag = await chrome.storage.local.get([key]);
+      const prof = bag[key] || {};
+      if (prof.PLAN) { prof.PLAN.fallbackSelectors = ['#e2eFallback']; }
+      await chrome.storage.local.set({ [key]: prof });
+    });
+    await panel.getByRole('button', { name: 'Insert Plan' }).click();
+    const v = await web.evaluate(() => (document.querySelector('#e2eFallback') as HTMLTextAreaElement)?.value || '');
     expect(v.length).toBeGreaterThan(0);
   });
 });

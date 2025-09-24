@@ -34,15 +34,26 @@
     return { fp: String(h), preview: `${first?.[0]||''}. ${last} · ${d.dob||'—'} · MRN••${(d.mrn||'').slice(-2)}` };
   }
 
+  let __assist_fp_last_sent = 0;
   function post() {
+    const now = Date.now();
+    // Max-frequency guard: avoid sending more than once per 1200ms
+    if (now - __assist_fp_last_sent < 1200) return;
+    __assist_fp_last_sent = now;
     const demo = heuristics();
     const { fp, preview } = fingerprint(demo);
     safeSend({ type:'EHR_DEMOGRAPHICS', demo, fp, preview });
   }
 
-  const mo = new MutationObserver(() => { post(); });
+  // Debounce demographics posts to avoid flooding on dynamic pages
+  let __assist_fp_timer = null;
+  function schedulePost() {
+    try { if (__assist_fp_timer) clearTimeout(__assist_fp_timer); } catch {}
+    __assist_fp_timer = setTimeout(() => { try { post(); } catch {} }, 300);
+  }
+  const mo = new MutationObserver(() => { schedulePost(); });
   mo.observe(document.documentElement, { subtree:true, childList:true, characterData:true });
-  post();
+  schedulePost();
 
   // Mapping overlay -------------------------------------------------
   let mapping = false; let currentSection = 'PLAN';
