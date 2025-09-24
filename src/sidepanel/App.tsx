@@ -12,7 +12,8 @@ import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
 import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
 import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
-const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
+import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
+const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
   return (
@@ -148,6 +149,8 @@ function AppInner() {
   // Recovery snapshot state
   const [snapshotInfo, setSnapshotInfo] = useState<{ ts: number; keys: string[] } | null>(null);
   const [recoveryBanner, setRecoveryBanner] = useState(false);
+  const [speechRecognitionState, setSpeechRecognitionState] = useState<SpeechRecognitionState>('idle');
+  const speechManagerRef = useRef<SpeechRecognitionManager | null>(null);
 
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
@@ -435,152 +438,139 @@ function AppInner() {
     }
   }, []);
 
-  // Web Speech supervisor (hybrid): kept paused during dictation; resumes on quiet
+  // Unified Speech Recognition Manager
   useEffect(() => {
-    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!SR) {
-      console.warn('[AssistMD] Web Speech not supported');
-      return;
+    // Only create speech manager if we don't have one
+    if (!speechManagerRef.current) {
+      console.log('[AssistMD] Initializing unified speech recognition');
+      
+      speechManagerRef.current = new SpeechRecognitionManager({
+        onResult: async (transcript) => {
+          // Update live words display
+          setLiveWords(transcript);
+          
+          // Check if TTS is speaking
+          if ((window as any).speechSynthesis?.speaking) {
+            console.log('[AssistMD] Ignoring result - TTS is speaking');
+            try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
+            return;
+          }
+          
+          // Process the result through existing intent handler
+          await handleSRResult({
+            results: [[{ transcript }]],
+            resultIndex: 0
+          });
+        },
+        onStateChange: (state) => {
+          console.log('[AssistMD] Speech recognition state:', state);
+          setSpeechRecognitionState(state);
+        },
+        onError: (error) => {
+          console.error('[AssistMD] Speech recognition error:', error);
+          if (error !== 'Microphone permission denied') {
+            // Don't show toast for minor errors
+            return;
+          }
+          toast.push(`Voice error: ${error}`);
+        },
+        continuous: true,
+        interimResults: false
+      });
     }
 
-    let rec: any = null;
-    let live = false;
-    let killed = false;
-    let wantOn = true;
-    console.log('[AssistMD] SR supervisor starting');
-    let restartTimer: any = null;
-    let cooldownUntil = 0;
-    const RESTART_MS = 600;
-
-    const startSR = () => {
-      console.log('[AssistMD] startSR called', { killed, live, wantOn, cooldown: Date.now() < cooldownUntil });
-      if (killed || live || !wantOn) return;
-      if (Date.now() < cooldownUntil) return;
-      try {
-        rec = new SR();
-        rec.lang = 'en-US';
-        rec.continuous = true;
-        rec.interimResults = false;
-        rec.onresult = handleSRResult;
-        rec.onerror = (e: any) => {
-          const err = e?.error || e;
-          const benign = err === 'no-speech' || err === 'aborted' || err === 'network';
-          if (!benign) console.warn('[AssistMD] SpeechRecognition error', err);
-          cooldownUntil = Date.now() + 800;
-        };
-        rec.onend = () => {
-          live = false;
-          if (killed) return;
-          if (wantOn) {
-            clearTimeout(restartTimer);
-            restartTimer = setTimeout(startSR, RESTART_MS);
-          }
-        };
-
-        rec.start();
-        live = true;
-        console.log('[AssistMD] SR started successfully');
-      } catch (err) {
-        console.error('[AssistMD] SR start failed:', err);
-        live = false;
-        cooldownUntil = Date.now() + 800;
-        clearTimeout(restartTimer);
-        restartTimer = setTimeout(startSR, RESTART_MS);
-      }
-    };
-
-    const stopSR = () => {
-      wantOn = false;
-      clearTimeout(restartTimer);
-      if (live && rec) {
-        try { rec.stop(); } catch {}
-      }
-      live = false;
-    };
-
-    const speakGuard = setInterval(() => {
-      const talking = (window as any).speechSynthesis?.speaking;
-      if (talking) {
-        if (live && rec) {
-          try { rec.stop(); } catch {}
-        }
-        live = false;
-      } else if (wantOn && !live) {
-        startSR();
+    // Handle TTS speaking - pause recognition during speech synthesis
+    const ttsMonitor = setInterval(() => {
+      if (!speechManagerRef.current) return;
+      
+      const speaking = (window as any).speechSynthesis?.speaking;
+      if (speaking && speechManagerRef.current.isListening()) {
+        console.log('[AssistMD] Pausing for TTS');
+        speechManagerRef.current.pause();
+      } else if (!speaking && speechManagerRef.current.getState() === 'paused') {
+        console.log('[AssistMD] Resuming after TTS');
+        speechManagerRef.current.resume();
       }
     }, 200);
 
-    const onMsg = (m: any) => {
-      if (m?.type === 'ASR_VAD') {
-        if (m.state === 'speaking') {
-          // Stop SR during dictation to avoid interference
-          wantOn = false;
-          if (live && rec) {
-            try { rec.stop(); } catch {}
-          }
-          live = false;
-        } else if (m.state === 'quiet') {
-          // Resume SR when dictation stops
-          wantOn = true;
-          startSR();
+    // Cleanup function
+    return () => {
+      clearInterval(ttsMonitor);
+      if (speechManagerRef.current) {
+        console.log('[AssistMD] Cleaning up speech recognition');
+        speechManagerRef.current.destroy();
+        speechManagerRef.current = null;
+      }
+    };
+  }, [toast]);
+
+  // Handle ASR_VAD messages (pause during dictation)
+  useEffect(() => {
+    const handleMessage = (message: any) => {
+      if (!speechManagerRef.current) return;
+      
+      if (message?.type === 'ASR_VAD') {
+        if (message.state === 'speaking') {
+          // Pause recognition during dictation
+          console.log('[AssistMD] Pausing recognition - dictation active');
+          speechManagerRef.current.pause();
+        } else if (message.state === 'quiet') {
+          // Resume recognition when dictation stops
+          console.log('[AssistMD] Resuming recognition - dictation stopped');
+          speechManagerRef.current.resume();
         }
       }
     };
-    chrome.runtime.onMessage.addListener(onMsg);
 
-    const kick = () => {
-      wantOn = true;
-      startSR();
-    };
-    
-    // Chrome requires user gesture for speech recognition
-    // Try multiple strategies to start as soon as possible
-    
-    // Strategy 1: Start when panel opens (may work in side panel context)
-    wantOn = true;
-    startSR();
-    
-    // Strategy 2: Start after any Chrome API interaction
-    chrome.runtime.sendMessage({ type: 'PING' }).then(() => {
-      if (!live) {
-        console.log('[AssistMD] Starting SR after API interaction');
-        wantOn = true;
-        startSR();
-      }
-    }).catch(() => {});
-    
-    // Strategy 3: Auto-start when recording begins
-    const watchRecording = setInterval(() => {
-      if (recordingRef.current && !live) {
-        console.log('[AssistMD] Auto-starting SR with recording');
-        wantOn = true;
-        startSR();
-        clearInterval(watchRecording);
-      }
-    }, 100);
-    setTimeout(() => clearInterval(watchRecording), 5000); // Give up after 5s
-    
-    // Keep the user gesture fallbacks
-    window.addEventListener('pointerdown', kick, { once: true });
-    window.addEventListener('keydown', kick, { once: true });
-    const idle = setTimeout(() => { 
-      if (!live) {
-        console.log('[AssistMD] Attempting idle SR start');
-        wantOn = true; 
-        startSR(); 
-      }
-    }, 800);
-
+    chrome.runtime.onMessage.addListener(handleMessage);
     return () => {
-      killed = true;
-      clearTimeout(idle);
-      clearInterval(speakGuard);
-      chrome.runtime.onMessage.removeListener(onMsg);
-      window.removeEventListener('pointerdown', kick);
-      window.removeEventListener('keydown', kick);
-      stopSR();
+      chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
+
+  // Start speech recognition on user interaction or when recording starts
+  useEffect(() => {
+    const startRecognition = () => {
+      if (speechManagerRef.current && speechRecognitionState === 'idle') {
+        console.log('[AssistMD] Starting speech recognition');
+        speechManagerRef.current.start();
+      }
+    };
+
+    // Try to start immediately (may work in side panel)
+    const startTimer = setTimeout(() => {
+      startRecognition();
+    }, 100);
+
+    // Start when recording begins
+    if (recording && speechManagerRef.current && speechRecognitionState === 'idle') {
+      startRecognition();
+    }
+
+    // Strategy 2: Start after Chrome API interaction
+    chrome.runtime.sendMessage({ type: 'PING' }).then(() => {
+      startRecognition();
+    }).catch(() => {});
+
+    // Fallback: start on first interaction
+    const interactionHandler = () => {
+      startRecognition();
+      document.removeEventListener('click', interactionHandler);
+      document.removeEventListener('keydown', interactionHandler);
+      window.removeEventListener('focus', interactionHandler);
+    };
+    
+    document.addEventListener('click', interactionHandler, { once: true });
+    document.addEventListener('keydown', interactionHandler, { once: true });
+    window.addEventListener('focus', interactionHandler, { once: true });
+
+    return () => {
+      clearTimeout(startTimer);
+      document.removeEventListener('click', interactionHandler);
+      document.removeEventListener('keydown', interactionHandler);
+      window.removeEventListener('focus', interactionHandler);
+    };
+  }, [speechRecognitionState, recording]);
 
   const getContentTab = useCallback(async () => {
     const tabs = await chrome.tabs.query({ lastFocusedWindow: true });
@@ -1679,7 +1669,7 @@ ${section.join(' ')}`;
                 </button>
               </div>
             )}
-            <CommandStrip message={commandMessage} />
+            <CommandStrip message={commandMessage} speechState={speechRecognitionState} />
             <TranscriptList />
             {wsMonitor}
             {commandLog.length > 0 && (
