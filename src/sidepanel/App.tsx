@@ -1344,6 +1344,8 @@ ${section.join(' ')}`;
               opacity={opacity}
               mode={mode}
               wsState={wsState}
+              host={host}
+              hostAllowed={!!host && allowedHosts.includes(host)}
               onToggleFocus={() => setFocusMode((v) => !v)}
               onOpacity={setOpacity}
               onOpenSettings={() => setSettingsOpen((v) => !v)}
@@ -1585,6 +1587,24 @@ ${section.join(' ')}`;
                 <div className="text-sm font-medium mt-3">Mappings</div>
                 <div className="text-[12px] text-slate-700 space-y-1">
                   <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onTestMappings}>Test Mappings</button>
+                </div>
+                <div className="text-sm font-medium mt-3">Safety Utilities</div>
+                <div className="text-[12px] text-slate-700 space-y-1 flex gap-2 flex-wrap">
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => { try { await chrome.storage.local.remove(['ASSIST_CONFIRMED_FP']); toast.push('Patient confirmation reset'); } catch {} }}
+                  >
+                    Reset Patient Confirmation
+                  </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => {
+                      if (!host) { toast.push('No host'); return; }
+                      try { await chrome.storage.local.remove([`MAP_${host}`]); toast.push('Cleared mappings for host'); setProfile({} as any); } catch { toast.push('Failed to clear mappings'); }
+                    }}
+                  >
+                    Clear Mappings (This Host)
+                  </button>
                 </div>
                 <div className="text-sm font-medium mt-3">Connection Self‑Test</div>
                 <div className="text-[12px] text-slate-700 space-y-1 flex gap-2 flex-wrap">

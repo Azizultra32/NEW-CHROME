@@ -6,6 +6,8 @@ type Props = {
   opacity: number;
   mode: 'idle' | 'mock' | 'live';
   wsState: 'disconnected' | 'connecting' | 'open' | 'error';
+  host?: string;
+  hostAllowed?: boolean;
   onToggleFocus: () => void;
   onOpacity: (v: number) => void;
   onOpenSettings?: () => void;
@@ -24,7 +26,7 @@ const wsClasses = {
   disconnected: 'bg-slate-200 text-slate-700'
 } as const;
 
-export const Header: React.FC<Props> = ({ recording, focusMode, opacity, mode, wsState, onToggleFocus, onOpacity, onOpenSettings }) => {
+export const Header: React.FC<Props> = ({ recording, focusMode, opacity, mode, wsState, host, hostAllowed, onToggleFocus, onOpacity, onOpenSettings }) => {
   return (
     <header className="flex items-center gap-3">
       <h1 className="text-lg font-semibold">AssistMD</h1>
@@ -37,6 +39,11 @@ export const Header: React.FC<Props> = ({ recording, focusMode, opacity, mode, w
       <span className={`px-2 py-1 text-xs rounded-full capitalize ${wsClasses[wsState]}`}>
         {wsState}
       </span>
+      {host && (
+        <span className={`px-2 py-1 text-xs rounded-full ${hostAllowed ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`} title={hostAllowed ? 'This host is allowlisted' : 'This host is not allowlisted'}>
+          {hostAllowed ? 'Allowed' : 'Not allowed'}
+        </span>
+      )}
       <div className="ml-auto flex items-center gap-3 text-xs">
         <button
           className={`px-2 py-1 rounded-md border ${focusMode ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-700 border-slate-300'}`}
