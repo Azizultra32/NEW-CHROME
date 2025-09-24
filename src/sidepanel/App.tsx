@@ -35,6 +35,7 @@ function AppInner() {
   const [profile, setProfile] = useState<Record<Section, FieldMapping>>({} as any);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiBase, setApiBase] = useState('');
+  const [allowedHosts, setAllowedHosts] = useState<string[]>([]);
   const [wsEvents, setWsEvents] = useState<string[]>([]);
   const [commandLog, setCommandLog] = useState<string[]>([]);
   const [transcriptFormat, setTranscriptFormat] = useState<'RAW' | 'SOAP' | 'APSO'>('RAW');
@@ -605,6 +606,12 @@ function AppInner() {
       const url = tab?.url || '';
       if (!url) return true;
       const origin = (() => { try { return new URL(url).origin + '/*'; } catch { return ''; } })();
+      // Enforce host allowlist first
+      if (host && allowedHosts && allowedHosts.length && !allowedHosts.includes(host)) {
+        setPermBanner(true);
+        notifyError('Host not allowed. Add it in Settings to enable mapping/insert.');
+        return false;
+      }
       const contains = (chrome.permissions as any).contains?.bind(chrome.permissions) || (async () => false);
       const request = (chrome.permissions as any).request?.bind(chrome.permissions) || (async () => false);
       const has = await contains({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
@@ -670,6 +677,36 @@ function AppInner() {
     }
   }, [apiBase, toast]);
 
+  const addCurrentHostToAllowlist = useCallback(async () => {
+    if (!host) { toast.push('No active host'); return; }
+    const next = Array.from(new Set([...(allowedHosts || []), host])).sort();
+    try {
+      await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+      setAllowedHosts(next);
+      toast.push(`Allowed ${host}`);
+    } catch { toast.push('Failed to update allowlist'); }
+  }, [host, allowedHosts, toast]);
+
+  const removeHostFromAllowlist = useCallback(async (h: string) => {
+    const next = (allowedHosts || []).filter((x) => x !== h);
+    try {
+      await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+      setAllowedHosts(next);
+      toast.push(`Removed ${h}`);
+    } catch { toast.push('Failed to update allowlist'); }
+  }, [allowedHosts, toast]);
+
+  const onTestMappings = useCallback(async () => {
+    if (!host) { toast.push('No host detected'); return; }
+    const sections: Section[] = ['PLAN','HPI','ROS','EXAM'];
+    for (const s of sections) {
+      const field = profile?.[s];
+      if (!field?.selector) continue;
+      const res = await verifyTarget(field as any);
+      toast.push(`${s}: ${res.ok ? 'OK' : res.reason === 'missing' ? 'Missing' : 'Not editable'}`);
+    }
+  }, [host, profile, toast]);
+
   const onBackupAll = useCallback(async () => {
     try {
       const bag = await chrome.storage.local.get(null);
@@ -713,6 +750,16 @@ function AppInner() {
       try {
         const { API_BASE } = await chrome.storage.local.get(['API_BASE']);
         if (API_BASE) setApiBase(API_BASE);
+      } catch {}
+    })();
+  }, []);
+
+  // Load allowed hosts (permissions allowlist)
+  useEffect(() => {
+    (async () => {
+      try {
+        const { ALLOWED_HOSTS } = await chrome.storage.local.get(['ALLOWED_HOSTS']);
+        if (Array.isArray(ALLOWED_HOSTS)) setAllowedHosts(ALLOWED_HOSTS as string[]);
       } catch {}
     })();
   }, []);
@@ -1484,6 +1531,23 @@ ${section.join(' ')}`;
                   <div className="mt-2 flex gap-2">
                     <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={() => ensurePerms()}>Request Permissions</button>
                   </div>
+                </div>
+                <div className="text-sm font-medium mt-3">Host Allowlist</div>
+                <div className="text-[12px] text-slate-700 space-y-2">
+                  <div>Current: <span className="font-mono">{host || '(none)'}</span> {host && allowedHosts.includes(host) ? <span className="text-emerald-600">(allowed)</span> : <span className="text-amber-600">(not allowed)</span>}</div>
+                  <div className="flex gap-2 flex-wrap">
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={addCurrentHostToAllowlist} disabled={!host}>Allow Current Host</button>
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={() => { if (host) removeHostFromAllowlist(host); }} disabled={!host || !allowedHosts.includes(host)}>Remove Current Host</button>
+                  </div>
+                  {allowedHosts && allowedHosts.length > 0 && (
+                    <div className="text-[11px] text-slate-600">Allowed: {allowedHosts.map((h) => (
+                      <button key={h} className="mr-2 underline" onClick={() => removeHostFromAllowlist(h)} title="Remove">{h}</button>
+                    ))}</div>
+                  )}
+                </div>
+                <div className="text-sm font-medium mt-3">Mappings</div>
+                <div className="text-[12px] text-slate-700 space-y-1">
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onTestMappings}>Test Mappings</button>
                 </div>
                 <div className="text-sm font-medium mt-3">Telemetry (local)</div>
                 <div className="text-[12px] text-slate-700">
