@@ -35,13 +35,17 @@
   }
 
   let __assist_fp_last_sent = 0;
+  let __assist_fp_last_val = '';
   function post() {
     const now = Date.now();
     // Max-frequency guard: avoid sending more than once per 1200ms
     if (now - __assist_fp_last_sent < 1200) return;
-    __assist_fp_last_sent = now;
     const demo = heuristics();
     const { fp, preview } = fingerprint(demo);
+    // Skip identical fingerprint spam within a short TTL (5s)
+    if (fp && fp === __assist_fp_last_val && (now - __assist_fp_last_sent) < 5000) return;
+    __assist_fp_last_val = fp;
+    __assist_fp_last_sent = now;
     safeSend({ type:'EHR_DEMOGRAPHICS', demo, fp, preview });
   }
 

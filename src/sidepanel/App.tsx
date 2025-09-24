@@ -744,6 +744,43 @@ function AppInner() {
     }
   }, [toast]);
 
+  const onSelfTestPresign = useCallback(async () => {
+    try {
+      const encId = crypto.randomUUID();
+      const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
+      if (presign?.ok && presign.wssUrl) {
+        toast.push('Presign OK');
+        pushWsEvent('selftest: presign ok');
+      } else {
+        toast.push(`Presign failed (${presign?.status ?? 'n/a'})`);
+        pushWsEvent('selftest: presign failed');
+      }
+    } catch (e) {
+      toast.push('Presign request error');
+    }
+  }, [toast]);
+
+  const onSelfTestWS = useCallback(async () => {
+    try {
+      setBusy(true);
+      const encId = crypto.randomUUID();
+      const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
+      if (!(presign?.ok && presign.wssUrl)) { toast.push('WS test: presign failed'); return; }
+      await chrome.runtime.sendMessage({ type: 'START_CAPTURE' }).catch(() => {});
+      await chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: presign.wssUrl }).catch(() => {});
+      toast.push('WS test: connected (2s)');
+      setTimeout(async () => {
+        await chrome.runtime.sendMessage({ type: 'ASR_DISCONNECT' }).catch(() => {});
+        await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }).catch(() => {});
+        toast.push('WS test: disconnected');
+      }, 2000);
+    } catch {
+      toast.push('WS test error');
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
   // Load API base on mount
   useEffect(() => {
     (async () => {
@@ -1548,6 +1585,11 @@ ${section.join(' ')}`;
                 <div className="text-sm font-medium mt-3">Mappings</div>
                 <div className="text-[12px] text-slate-700 space-y-1">
                   <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onTestMappings}>Test Mappings</button>
+                </div>
+                <div className="text-sm font-medium mt-3">Connection Self‑Test</div>
+                <div className="text-[12px] text-slate-700 space-y-1 flex gap-2 flex-wrap">
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onSelfTestPresign} disabled={busy}>Presign Test</button>
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onSelfTestWS} disabled={busy}>WS Quick Test</button>
                 </div>
                 <div className="text-sm font-medium mt-3">Telemetry (local)</div>
                 <div className="text-[12px] text-slate-700">
