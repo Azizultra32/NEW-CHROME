@@ -82,6 +82,32 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
     await chrome.sidePanel.open({ windowId: tab.windowId });
+    
+    // Show helpful notification about OS-level always-on-top
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const isWindows = navigator.platform.toUpperCase().indexOf('WIN') >= 0;
+    
+    let message = 'Tip: Keep AssistMD on top using ';
+    if (isMac) {
+      message += 'Rectangle/Magnet window manager';
+    } else if (isWindows) {
+      message += 'PowerToys (Win+Ctrl+T)';
+    } else {
+      message += 'your window manager\'s always-on-top feature';
+    }
+    
+    // Only show tip once per session
+    const shown = await chrome.storage.session.get('alwaysOnTopTipShown');
+    if (!shown.alwaysOnTopTipShown) {
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon-48.png',
+        title: 'AssistMD Tip',
+        message: message,
+        requireInteraction: false
+      });
+      await chrome.storage.session.set({ alwaysOnTopTipShown: true });
+    }
   } catch {
     chrome.windows.create({ url: chrome.runtime.getURL('sidepanel.html'), type: 'popup', width: 420, height: 740 });
   }

@@ -1,5 +1,27 @@
 import type { FieldMapping, Strategy } from './mapping';
 
+type SelectorOptions = {
+  preferredSelector?: string;
+  strict?: boolean;
+};
+
+type InsertOptions = SelectorOptions;
+
+export type InsertResult =
+  | { ok: true; strategy: Strategy | 'clipboard'; selector: string }
+  | { ok: false };
+
+function buildSelectorList(primary: string, fallbacks: string[] | undefined, preferred?: string, strict?: boolean) {
+  const base = [primary].concat(Array.isArray(fallbacks) ? fallbacks : []).filter(Boolean);
+  if (!base.length) return [] as string[];
+  if (!preferred) return Array.from(new Set(base));
+  if (strict) {
+    return base.includes(preferred) ? [preferred] : [preferred];
+  }
+  const rest = base.filter((s) => s !== preferred);
+  return [preferred].concat(rest.filter(Boolean));
+}
+
 export async function insertTextInto(selector: string, text: string, framePath?: number[]): Promise<Strategy | 'fail'> {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) return 'fail';
@@ -200,24 +222,30 @@ async function resolveTargetTabId(mapping?: FieldMapping): Promise<number | null
   return tab.id;
 }
 
-export async function insertUsingMapping(mapping: FieldMapping, text: string): Promise<Strategy | 'fail'> {
+export async function insertUsingMapping(mapping: FieldMapping, text: string, options: InsertOptions = {}): Promise<InsertResult> {
   const tabId = await resolveTargetTabId(mapping);
-  if (!tabId) return 'fail';
+  if (!tabId) return { ok: false };
+  const selectors = buildSelectorList(mapping.selector, mapping.fallbackSelectors, options.preferredSelector, options.strict);
+  if (!selectors.length) return { ok: false };
+
   const execResult = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (sel: string, value: string, path?: number[], fallbacks?: string[]) => {
+    func: (selectors: string[], value: string, path?: number[]) => {
       let w: Window & typeof globalThis = window;
       try {
         if (Array.isArray(path) && path.length) {
           for (const i of path) { w = (w.frames[i] as any); if (!w) break; }
         }
-      } catch { return 'fail'; }
+      } catch { return { status: 'fail' as const }; }
       const doc = w?.document || document;
-      const selectors = [sel].concat(Array.isArray(fallbacks) ? fallbacks : []);
       let el: any = null;
-      for (const s of selectors) { el = (doc.querySelector(s) as any) || null; if (el) break; }
-      if (!el) return 'fail';
-      // ContentEditable: prefer Range insertion, fallback to execCommand
+      let chosen = selectors[0] || '';
+      for (const s of selectors) {
+        const candidate = (doc.querySelector(s) as any) || null;
+        if (candidate) { el = candidate; chosen = s; break; }
+      }
+      if (!el) return { status: 'fail' as const };
+
       if (el.isContentEditable) {
         try {
           el.focus();
@@ -232,7 +260,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
             }
             try {
               (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
-                kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+                kind: 'ce', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
                 htmlBefore: el.innerHTML
               };
             } catch {}
@@ -243,24 +271,24 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
             range.collapse(true);
             selection.removeAllRanges();
             selection.addRange(range);
-            return 'execCommand';
+            return { status: 'execCommand' as const, selector: chosen };
           }
         } catch {}
         const ok = (doc as Document).execCommand('insertText', false, value);
         try {
           (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
-            kind: 'ce', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+            kind: 'ce', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
             htmlBefore: el.innerHTML
           };
         } catch {}
-        return ok ? 'execCommand' : 'fail';
+        return ok ? { status: 'execCommand' as const, selector: chosen } : { status: 'fail' as const };
       }
-      // Input/Textarea: caret-aware insertion
+
       if ('value' in el) {
         try {
           const disabled = !!el.disabled || el.getAttribute?.('aria-disabled') === 'true';
           const ro = !!el.readOnly || el.getAttribute?.('readonly') !== null || el.getAttribute?.('aria-readonly') === 'true';
-          if (disabled || ro) return 'fail';
+          if (disabled || ro) return { status: 'fail' as const };
         } catch {}
         el.focus();
         try {
@@ -269,7 +297,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
           const src = String(el.value ?? '');
           try {
             (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
-              kind: 'value', selector: sel, framePath: Array.isArray(path) ? path.slice(0) : [],
+              kind: 'value', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
               valueBefore: src, selectionStart: start, selectionEnd: end
             };
           } catch {}
@@ -282,20 +310,23 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
             try { el.setSelectionRange(pos, pos); } catch {}
           }
           el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
-          return 'value';
+          return { status: 'value' as const, selector: chosen };
         } catch {
           el.value = value;
           el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
-          return 'value';
+          return { status: 'value' as const, selector: chosen };
         }
       }
-      return 'fail';
+      return { status: 'fail' as const };
     },
-    args: [mapping.selector, text, mapping.framePath, mapping.fallbackSelectors]
+    args: [selectors, text, mapping.framePath]
   }).catch(() => null);
 
-  const directResult = execResult?.[0]?.result as Strategy | 'fail' | undefined;
-  if (directResult && directResult !== 'fail') return directResult;
+  const directResult = execResult?.[0]?.result as { status: Strategy | 'fail'; selector?: string } | undefined;
+  if (directResult && directResult.status !== 'fail') {
+    const selector = directResult.selector || selectors[0];
+    return { ok: true, strategy: directResult.status, selector };
+  }
 
   try { await navigator.clipboard.writeText(text); } catch {}
 
@@ -311,7 +342,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string): P
     args: [mapping.framePath]
   }).catch(() => {});
 
-  return 'clipboard';
+  return { ok: true, strategy: 'clipboard', selector: selectors[0] };
 }
 
 // Undo last insert in the active tab using snapshot captured during insert.
@@ -374,16 +405,17 @@ export async function undoLastInsert(): Promise<boolean> {
 
 export type VerifyResult = { ok: true } | { ok: false; reason: 'missing' | 'not_editable' };
 
-export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult> {
+export async function verifyTarget(mapping: FieldMapping, options: SelectorOptions = {}): Promise<VerifyResult> {
   const tabId = await resolveTargetTabId(mapping);
   if (!tabId) return { ok: false, reason: 'missing' };
+  const selectors = buildSelectorList(mapping.selector, mapping.fallbackSelectors, options.preferredSelector, options.strict);
+  if (!selectors.length) return { ok: false, reason: 'missing' };
   const res = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (sel: string, path?: number[], fallbacks?: string[]) => {
+    func: (selectors: string[], path?: number[]) => {
       let w: Window & typeof globalThis = window;
       try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return { ok: false, reason: 'missing' } as any; }
       const doc = w?.document || document;
-      const selectors = [sel].concat(Array.isArray(fallbacks) ? fallbacks : []);
       let el: any = null;
       for (const s of selectors) { el = (doc.querySelector(s) as any) || null; if (el) break; }
       if (!el) return { ok: false, reason: 'missing' } as any;
@@ -397,8 +429,62 @@ export async function verifyTarget(mapping: FieldMapping): Promise<VerifyResult>
       if (disabled || readonlyAttr) return { ok: false, reason: 'not_editable' } as any;
       return { ok: true } as any;
     },
-    args: [mapping.selector, mapping.framePath, mapping.fallbackSelectors]
+    args: [selectors, mapping.framePath]
   }).catch(() => null);
   const out = (res && res[0] && res[0].result) as VerifyResult | undefined;
   return out || { ok: false, reason: 'missing' };
+}
+
+export async function getFieldContent(mapping: FieldMapping, options: SelectorOptions = {}): Promise<{ selector: string; content: string | null } | null> {
+  const tabId = await resolveTargetTabId(mapping);
+  if (!tabId) return null;
+  const selectors = buildSelectorList(mapping.selector, mapping.fallbackSelectors, options.preferredSelector, options.strict);
+  if (!selectors.length) return null;
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (selectors: string[], path?: number[]) => {
+      let w: Window & typeof globalThis = window;
+      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return null; }
+      const doc = w?.document || document;
+      for (const selector of selectors) {
+        const el: any = (doc.querySelector(selector) as any) || null;
+        if (!el) continue;
+        if ('value' in el) {
+          return { selector, content: String(el.value ?? '') };
+        }
+        if (el.isContentEditable) {
+          const text = typeof el.innerText === 'string' ? el.innerText : (el.textContent || '');
+          return { selector, content: text };
+        }
+        return { selector, content: null };
+      }
+      return null;
+    },
+    args: [selectors, mapping.framePath]
+  }).catch(() => null);
+  return (res && res[0]?.result) || null;
+}
+
+export async function listMatchingSelectors(mapping: FieldMapping, options: SelectorOptions = {}): Promise<string[]> {
+  const tabId = await resolveTargetTabId(mapping);
+  if (!tabId) return [];
+  const selectors = buildSelectorList(mapping.selector, mapping.fallbackSelectors, options.preferredSelector, options.strict);
+  if (!selectors.length) return [];
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (selectors: string[], path?: number[]) => {
+      let w: Window & typeof globalThis = window;
+      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return [] as string[]; }
+      const doc = w?.document || document;
+      const matches: string[] = [];
+      for (const selector of selectors) {
+        if (doc.querySelector(selector)) {
+          matches.push(selector);
+        }
+      }
+      return matches;
+    },
+    args: [selectors, mapping.framePath]
+  }).catch(() => null);
+  return (res && res[0]?.result) || [];
 }

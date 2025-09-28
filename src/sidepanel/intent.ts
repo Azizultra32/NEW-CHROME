@@ -8,6 +8,8 @@ export type Intent =
   | { name: 'timestamp' }
   | { name: 'insert'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
   | { name: 'template'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
+  | { name: 'map'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
+  | { name: 'template_edit'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
   | { name: 'undo' };
 
 export function parseIntent(raw: string): Intent | null {
@@ -30,6 +32,10 @@ export function parseIntent(raw: string): Intent | null {
   // Insert commands
   const m = rest.match(/^(insert|add) (plan|hpi|ros|exam)$/);
   if (m) return { name: 'insert', section: m[2] as any };
+  const map = rest.match(/^(map|remap) (plan|hpi|ros|exam)$/);
+  if (map) return { name: 'map', section: map[2] as any };
+  const editTpl = rest.match(/^(edit template|template edit|update template) (plan|hpi|ros|exam)$/);
+  if (editTpl) return { name: 'template_edit', section: editTpl[2] as any };
   // Template commands
   const t = rest.match(/^(template|insert template) (plan|hpi|ros|exam)$/);
   if (t) return { name: 'template', section: t[2] as any };

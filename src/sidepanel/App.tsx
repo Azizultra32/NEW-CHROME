@@ -9,7 +9,7 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
+import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert, getFieldContent, listMatchingSelectors } from './lib/insert';
 import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
 import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
@@ -29,6 +29,12 @@ function AppInner() {
   const [focusMode, setFocusMode] = useState(false);
   const [opacity, setOpacity] = useState(80);
   const [mode, setMode] = useState<'idle' | 'mock' | 'live'>('idle');
+  
+  // Detect if running in iframe mode
+  const isIframeMode = useMemo(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('mode') === 'overlay' || window.parent !== window;
+  }, []);
   const [wsState, setWsState] = useState<'disconnected' | 'connecting' | 'open' | 'error'>('disconnected');
   const [lastError, setLastError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -238,15 +244,57 @@ function AppInner() {
     } catch {}
   }
 
-  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
+  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string; selector: string; bypassGuard?: boolean }>(null);
+  const [pendingInsertDraft, setPendingInsertDraft] = useState('');
+  const [pendingInsertExisting, setPendingInsertExisting] = useState<string | null>(null);
+  const [pendingInsertLoading, setPendingInsertLoading] = useState(false);
+  const [pendingInsertMeta, setPendingInsertMeta] = useState<null | { selector: string; strict: boolean }>(null);
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
   const [permBanner, setPermBanner] = useState(false);
+  const [targetChooser, setTargetChooser] = useState<null | { section: Section; selectors: string[]; payload: string; bypassGuard?: boolean }>(null);
+  const [targetSelection, setTargetSelection] = useState<string>('');
+
+  type InsertOpts = {
+    bypassGuard?: boolean;
+    preferredSelector?: string;
+    payloadOverride?: string;
+    skipTargetPrompt?: boolean;
+    strictSelector?: boolean;
+  };
+
+  useEffect(() => {
+    if (!pendingInsert) {
+      setPendingInsertDraft('');
+      setPendingInsertExisting(null);
+      setPendingInsertLoading(false);
+      setPendingInsertMeta(null);
+      return;
+    }
+    setPendingInsertDraft(pendingInsert.payload);
+    setPendingInsertExisting(null);
+    setPendingInsertLoading(true);
+    (async () => {
+      try {
+        const field = profile?.[pendingInsert.section];
+        if (field) {
+          const snapshot = await getFieldContent(field as any, { preferredSelector: pendingInsert.selector, strict: true });
+          setPendingInsertExisting(snapshot?.content ?? '');
+        } else {
+          setPendingInsertExisting(null);
+        }
+      } catch {
+        setPendingInsertExisting(null);
+      } finally {
+        setPendingInsertLoading(false);
+      }
+    })();
+  }, [pendingInsert, profile]);
 
   // Request on‑demand permissions for scripting/tabs and current origin when needed (defined after getContentTab)
   let ensurePerms: () => Promise<boolean>;
 
-  async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
+  async function onInsert(section: Section, opts: InsertOpts = {}) {
     if (!host) { notifyError('No host context for mapping'); return; }
     const field = profile?.[section];
     if (!field?.selector) {
@@ -272,28 +320,66 @@ function AppInner() {
     // Verify target exists and editable
     // Ensure we can execute in the target tab
     await ensurePerms();
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); telemetry.recordEvent('verify_fail', { section, reason }).catch(() => {}); return; }
+    const selectors = Array.from(new Set([field.selector].concat(Array.isArray(field.fallbackSelectors) ? field.fallbackSelectors : []).filter(Boolean)));
+    const availableSelectors = await listMatchingSelectors(field as FieldMapping);
+    const shouldPrompt = !opts.skipTargetPrompt && selectors.length > 1 && availableSelectors.length > 1 && !opts.preferredSelector;
+    if (shouldPrompt) {
+      const options = availableSelectors.length ? availableSelectors : selectors;
+      setTargetChooser({ section, selectors: options, payload: opts.payloadOverride ?? getTranscriptPayload(), bypassGuard: opts.bypassGuard ?? true });
+      const first = options[0];
+      setTargetSelection(first);
+      telemetry.recordEvent('target_prompt_shown', { section, selectors: selectors.length }).catch(() => {});
+      return;
+    }
 
+    const chosen = opts.preferredSelector && selectors.includes(opts.preferredSelector) ? opts.preferredSelector : (availableSelectors[0] || selectors[0]);
+    const strict = opts.strictSelector ?? !!opts.preferredSelector;
+
+    const verify = await verifyTarget(field as any, { preferredSelector: chosen, strict });
+    if (!verify.ok) {
+      const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
+      notifyError(reason);
+      setRemapPrompt({ section });
+      telemetry.recordEvent('verify_fail', { section, reason, selector: chosen }).catch(() => {});
+      return;
+    }
+
+    const payload = opts.payloadOverride ?? getTranscriptPayload();
+    if (features.preview && !opts?.bypassGuard) {
+      setPendingInsert({ section, payload, selector: chosen, bypassGuard: opts.bypassGuard });
+      setPendingInsertMeta({ selector: chosen, strict });
+      return;
+    }
+
+    await finalizeInsert(section, field as FieldMapping, payload, { selector: chosen, strict });
+  }
+
+  function getTranscriptPayload() {
     const text = transcript
       .get()
       .filter((x) => !x.text.startsWith('[MOCK]'))
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const payload = text || '(empty)';
-    if (features.preview && !opts?.bypassGuard) {
-      setPendingInsert({ section, payload });
+    return text || '(empty)';
+  }
+
+  async function finalizeInsert(section: Section, field: FieldMapping, payload: string, target: { selector: string; strict: boolean }) {
+    const t0 = Date.now();
+    const result = await insertUsingMapping(field, payload, { preferredSelector: target.selector, strict: target.strict });
+    if (!result.ok) {
+      notifyError('Insert failed');
+      telemetry.recordEvent('insert_failed', { section, selector: target.selector }).catch(() => {});
       return;
     }
-    const t0 = Date.now();
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Insert ${section} via ${strategy}`);
-    pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
-    audit('insert_ok', { strategy, section });
+    toast.push(`Insert ${section} via ${result.strategy}`);
+    pushWsEvent(`audit: ${section.toLowerCase()} inserted (${result.selector})`);
+    audit('insert_ok', { strategy: result.strategy, section, selector: result.selector });
     setLastError(null);
     scheduleBackup();
-    telemetry.recordLatency('insert_latency', Date.now() - t0, { section, strategy }).catch(() => {});
+    const latency = Date.now() - t0;
+    telemetry.recordLatency('insert_latency', latency, { section, strategy: result.strategy, selector: result.selector }).catch(() => {});
+    telemetry.recordEvent('insert_selector', { section, selector: result.selector, strategy: result.strategy, latency }).catch(() => {});
   }
 
   const COMMAND_COOLDOWN_MS = 1000;
@@ -400,6 +486,19 @@ function AppInner() {
         if (intent.section === 'ros') await onInsertTemplate('ROS');
         if (intent.section === 'exam') await onInsertTemplate('EXAM');
         break;
+      case 'template_edit': {
+        if (!features.templates) { toastRef.current?.push('Templates disabled'); break; }
+        const section = intent.section.toUpperCase() as Section;
+        setCommandFeedback(`Command: edit template ${intent.section}`);
+        await editTemplate(section);
+        break;
+      }
+      case 'map': {
+        const section = intent.section.toUpperCase() as Section;
+        setCommandFeedback(`Command: map ${intent.section}`);
+        await activateMapMode(section);
+        break;
+      }
       case 'undo':
         if (!features.undo) { toastRef.current?.push('Undo disabled'); break; }
         setCommandFeedback('Command: undo');
@@ -421,14 +520,8 @@ function AppInner() {
   }
 
   async function onInsertTemplate(section: Section) {
-    const field = profile?.[section];
-    if (!host || !field?.selector) { toast.push(`Map ${section} first`); return; }
-    await ensurePerms();
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) { toast.push('Not editable or missing'); return; }
     const payload = defaultTemplates[section] || '(template)';
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Template ${section} via ${strategy}`);
+    await onInsert(section, { payloadOverride: payload });
   }
 
   useEffect(() => () => {
@@ -600,6 +693,7 @@ function AppInner() {
       if (host && allowedHosts && allowedHosts.length && !allowedHosts.includes(host)) {
         setPermBanner(true);
         notifyError('Host not allowed. Add it in Settings to enable mapping/insert.');
+        telemetry.recordEvent('permission_host_blocked', { host, origin }).catch(() => {});
         return false;
       }
       const contains = (chrome.permissions as any).contains?.bind(chrome.permissions) || (async () => false);
@@ -610,9 +704,11 @@ function AppInner() {
       if (!ok) {
         notifyError('Permissions denied. Enable permissions to map/insert.');
         setPermBanner(true);
+        telemetry.recordEvent('permission_denied', { origin, host }).catch(() => {});
         return false;
       }
       setPermBanner(false);
+      telemetry.recordEvent('permission_granted', { origin, host }).catch(() => {});
       return true;
     } catch {
       return true;
@@ -872,44 +968,56 @@ function AppInner() {
     };
   }, []);
 
-  const onMapFields = useCallback(async () => {
+  const activateMapMode = useCallback(async (section: Section) => {
     const activeTab = await getContentTab();
     if (!activeTab?.id) {
       toast.push('No active tab');
-      return;
+      return false;
     }
-
     try {
       await ensurePerms();
-      // Prompt for section to map (quick, non-blocking UI)
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
-      return;
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
     } catch (primaryErr) {
       console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
+      try {
+        await ensurePerms();
+        await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] });
+        await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
+      } catch (fallbackErr) {
+        console.error('MAP_MODE fallback failed', fallbackErr);
+        toast.push('Unable to enter map mode — reload the EHR tab and try again.');
+        return false;
+      }
     }
-
-    try {
-      await ensurePerms();
-      await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        files: ['content.js']
-      });
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
-    } catch (fallbackErr) {
-      console.error('MAP_MODE fallback failed', fallbackErr);
-      toast.push('Unable to enter map mode — reload the EHR tab and try again.');
-    }
+    toast.push(`Click a ${section} field to map`);
+    return true;
   }, [toast, getContentTab]);
+
+  const onMapFields = useCallback(async () => {
+    const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
+    const section = (String(choice || 'PLAN').toUpperCase() as Section);
+    const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
+    const pick = valid ? section : 'PLAN';
+    await activateMapMode(pick);
+  }, [activateMapMode]);
+
+  const editTemplate = useCallback(async (section: Section) => {
+    const cur = defaultTemplates[section];
+    const next = window.prompt(`Edit ${section} template`, cur);
+    if (next === null) return false;
+    try {
+      const key = (features.tplPerHost && host) ? `TPL_${host}_${section}` : `TPL_${section}`;
+      await chrome.storage.local.set({ [key]: next });
+      (defaultTemplates as any)[section] = next;
+      toast.push(`${section} template saved`);
+      scheduleBackup();
+      telemetry.recordEvent('template_saved', { section, host: features.tplPerHost ? host || '(global)' : 'global' }).catch(() => {});
+      return true;
+    } catch {
+      toast.push('Template save failed');
+      return false;
+    }
+  }, [features.tplPerHost, host, toast, scheduleBackup]);
 
   const formatTranscript = useCallback(() => {
     const items = transcript
@@ -1236,8 +1344,8 @@ ${section.join(' ')}`;
   );
 
   return (
-    <div className="relative">
-      {permBanner && (
+    <div className={`relative ${isIframeMode ? 'iframe-mode' : ''}`}>
+      {permBanner && !isIframeMode && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-sm flex items-center justify-between">
           <div>
             <span className="font-medium">Permissions needed</span>
@@ -1249,7 +1357,7 @@ ${section.join(' ')}`;
           </div>
         </div>
       )}
-      {recoveryBanner && snapshotInfo && (
+      {recoveryBanner && snapshotInfo && !isIframeMode && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900 px-3 py-2 text-sm flex items-center justify-between">
           <div>
             <span className="font-medium">Recovery snapshot found</span>
@@ -1289,19 +1397,86 @@ ${section.join(' ')}`;
           </div>
         </div>
       )}
-      {pendingInsert && (
+      {targetChooser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/30" />
-          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-3 space-y-2">
-            <div className="text-sm font-medium">Confirm insert → {pendingInsert.section}</div>
-            <div className="max-h-40 overflow-auto text-[12px] whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-2">
-              {pendingInsert.payload.slice(0, 1200)}
-              {pendingInsert.payload.length > 1200 ? '…' : ''}
+          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-4 space-y-3">
+            <div className="text-sm font-medium">Select target → {targetChooser.section}</div>
+            <div className="text-[12px] text-slate-600">Choose which mapped selector should receive this insert.</div>
+            <div className="max-h-40 overflow-auto space-y-2">
+              {targetChooser.selectors.map((sel) => (
+                <label key={sel} className="flex items-center gap-2 text-[12px] text-slate-700">
+                  <input
+                    type="radio"
+                    name="assist-target-choice"
+                    value={sel}
+                    checked={targetSelection === sel}
+                    onChange={() => setTargetSelection(sel)}
+                  />
+                  <span className="font-mono break-all">{sel}</span>
+                </label>
+              ))}
             </div>
             <div className="flex gap-2 justify-end">
               <button
                 className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                onClick={() => setPendingInsert(null)}
+                onClick={() => {
+                  setTargetChooser(null);
+                  setTargetSelection('');
+                  toast.push('Insert cancelled');
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
+                onClick={async () => {
+                  const choice = targetSelection || targetChooser.selectors[0];
+                  setTargetChooser(null);
+                  setTargetSelection('');
+                  await onInsert(targetChooser.section, {
+                    bypassGuard: targetChooser.bypassGuard,
+                    preferredSelector: choice,
+                    payloadOverride: targetChooser.payload,
+                    skipTargetPrompt: true,
+                    strictSelector: true
+                  });
+                }}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingInsert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/30" />
+          <div className="relative z-10 w-[460px] max-w-[95vw] rounded-lg border border-slate-200 bg-white shadow-xl p-4 space-y-3">
+            <div className="text-sm font-medium">Review insert → {pendingInsert.section}</div>
+            <div className="grid gap-2 text-[12px]">
+              <div className="text-slate-600">
+                <div className="font-medium text-slate-700">Existing content</div>
+                <div className="rounded border border-slate-200 bg-slate-50 p-2 min-h-[48px] whitespace-pre-wrap">
+                  {pendingInsertLoading ? 'Loading…' : (pendingInsertExisting ?? '(unavailable)')}
+                </div>
+              </div>
+              <div className="text-slate-600">
+                <div className="font-medium text-slate-700">New content</div>
+                <textarea
+                  className="w-full rounded border border-slate-300 bg-white p-2 h-32 text-[12px] font-mono"
+                  value={pendingInsertDraft}
+                  onChange={(e) => setPendingInsertDraft(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                onClick={() => {
+                  setPendingInsert(null);
+                  toast.push('Insert cancelled');
+                }}
               >
                 Cancel
               </button>
@@ -1309,12 +1484,16 @@ ${section.join(' ')}`;
                 className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                 onClick={async () => {
                   const field = profile?.[pendingInsert.section];
-                  if (field?.selector) {
-                    const strategy = await insertUsingMapping(field as any, pendingInsert.payload);
-                    toast.push(`Insert ${pendingInsert.section} via ${strategy}`);
-                    pushWsEvent(`audit: ${pendingInsert.section.toLowerCase()} inserted`);
-                    audit('insert_ok', { strategy, section: pendingInsert.section });
-                  }
+                  if (!field) { setPendingInsert(null); return; }
+                  await finalizeInsert(pendingInsert.section, field as FieldMapping, pendingInsertDraft, {
+                    selector: pendingInsert.selector,
+                    strict: pendingInsertMeta?.strict ?? true
+                  });
+                  telemetry.recordEvent('insert_preview_confirmed', {
+                    section: pendingInsert.section,
+                    selector: pendingInsert.selector,
+                    edited: pendingInsertDraft !== pendingInsert.payload
+                  }).catch(() => {});
                   setPendingInsert(null);
                 }}
               >
@@ -1473,22 +1652,16 @@ ${section.join(' ')}`;
                 </div>
                 <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
                 <div className="text-sm font-medium mt-3">Templates</div>
+                <div className="text-[11px] text-slate-500">
+                  {features.tplPerHost
+                    ? `Scoped to ${host || 'global default'}`
+                    : 'Applies to all hosts'}
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
                     <button key={sec}
                       className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                      onClick={async () => {
-                        const cur = defaultTemplates[sec];
-                        const next = window.prompt(`Edit ${sec} template`, cur);
-                        if (next === null) return;
-                        try {
-                          const key = (features.tplPerHost && host) ? `TPL_${host}_${sec}` : `TPL_${sec}`;
-                          await chrome.storage.local.set({ [key]: next });
-                          (defaultTemplates as any)[sec] = next;
-                          toast.push(`${sec} template saved`);
-                          scheduleBackup();
-                        } catch { toast.push('Save failed'); }
-                      }}
+                      onClick={async () => { await editTemplate(sec); }}
                     >
                       Edit {sec}
                     </button>
@@ -1504,7 +1677,8 @@ ${section.join(' ')}`;
                         (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
                         (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
                         (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
-                        toast.push('Templates loaded');
+                        const scope = features.tplPerHost ? (host || 'global default') : 'all hosts';
+                        toast.push(`Templates loaded (${scope})`);
                       } catch { toast.push('Load failed'); }
                     }}
                   >

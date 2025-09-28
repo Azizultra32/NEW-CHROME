@@ -6,7 +6,7 @@
   "action": { "default_title": "AssistMD" },
   "background": { "service_worker": "background.js" },
   "side_panel": { "default_path": "sidepanel.html" },
-  "permissions": ["storage", "activeTab", "offscreen"],
+  "permissions": ["storage", "activeTab", "offscreen", "notifications"],
   "optional_permissions": ["scripting", "tabs"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "icons": {
