@@ -699,7 +699,10 @@ function AppInner() {
       const contains = (chrome.permissions as any).contains?.bind(chrome.permissions) || (async () => false);
       const request = (chrome.permissions as any).request?.bind(chrome.permissions) || (async () => false);
       const has = await contains({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
-      if (has) return true;
+      if (has) {
+        await ensureContentScript?.();
+        return true;
+      }
       const ok = await request({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
       if (!ok) {
         notifyError('Permissions denied. Enable permissions to map/insert.');
@@ -709,6 +712,7 @@ function AppInner() {
       }
       setPermBanner(false);
       telemetry.recordEvent('permission_granted', { origin, host }).catch(() => {});
+      await ensureContentScript?.();
       return true;
     } catch {
       return true;
@@ -719,14 +723,35 @@ function AppInner() {
   ensureContentScript = async () => {
     try {
       const tab = await getContentTab();
-      if (tab?.id) {
-        try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
-        catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
+      if (!tab?.id || !tab.url) return;
+
+      let origin = '';
+      let hostname = '';
+      try {
+        const parsed = new URL(tab.url);
+        origin = `${parsed.origin}/*`;
+        hostname = parsed.hostname;
+      } catch {}
+
+      const allowlist = Array.isArray(allowedHosts) ? allowedHosts : [];
+      if (hostname && allowlist.length && !allowlist.includes(hostname)) {
+        return;
       }
+
+      if (origin) {
+        const contains = (chrome.permissions as any).contains?.bind(chrome.permissions);
+        if (typeof contains === 'function') {
+          const has = await contains({ permissions: ['scripting', 'tabs'], origins: [origin] }).catch(() => false);
+          if (!has) return;
+        }
+      }
+
+      try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
+      catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
     } catch {}
   };
 
-  useEffect(() => { ensureContentScript?.(); }, [getContentTab]);
+  useEffect(() => { ensureContentScript?.(); }, [getContentTab, allowedHosts]);
 
   // Capture active tab host & load mapping profile
   useEffect(() => {
