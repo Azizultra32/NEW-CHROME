@@ -55,6 +55,7 @@ function AppInner() {
   const [pttActive, setPttActive] = useState(false);
   const pttActiveRef = useRef(false);
   const [pairingState, setPairingState] = useState<{ enabled: boolean; pairs: Array<{ host?: string; title?: string; url?: string }> }>({ enabled: false, pairs: [] });
+  const [pairingBusy, setPairingBusy] = useState(false);
   const [windowTrackState, setWindowTrackState] = useState<{ sidepanelWindowId: number | null; lastKnown: { title?: string; url?: string } | null }>({ sidepanelWindowId: null, lastKnown: null });
 
   const defaultTemplates: Record<Section, string> = {
@@ -166,6 +167,16 @@ function AppInner() {
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
 
+  useEffect(() => {
+    if (wsState === 'connecting') {
+      setCommandFeedback('Connecting to transcriber…', true);
+    } else if (wsState === 'error') {
+      setCommandFeedback('Transcriber connection lost', true);
+    } else if (wsState === 'open') {
+      setCommandFeedback(BASE_COMMAND_MESSAGE);
+    }
+  }, [wsState]);
+
   // Ensure content script is present in active content tab when panel is open
   // (defined later, after getContentTab)
   let ensureContentScript: () => Promise<void>;
@@ -185,10 +196,10 @@ function AppInner() {
       try {
         const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_STATUS' }).catch(() => null);
         if (mounted && res && typeof res.enabled === 'boolean') {
-          setPairingState({
-            enabled: res.enabled,
-            pairs: Array.isArray(res.pairs) ? res.pairs : []
-          });
+          const enabled = res.enabled;
+          const pairs = Array.isArray(res.pairs) ? res.pairs : [];
+          setPairingState({ enabled, pairs });
+          telemetry.recordEvent('window_pair_status', { enabled, pairs: pairs.length, source: 'sync' }).catch(() => {});
         }
       } catch {}
       try {
@@ -206,10 +217,10 @@ function AppInner() {
     const handler = (message: any) => {
       if (!mounted) return;
       if (message?.type === 'WINDOW_PAIR_STATUS_EVENT') {
-        setPairingState({
-          enabled: !!message.enabled,
-          pairs: Array.isArray(message.pairs) ? message.pairs : []
-        });
+        const enabled = !!message.enabled;
+        const pairs = Array.isArray(message.pairs) ? message.pairs : [];
+        setPairingState({ enabled, pairs });
+        telemetry.recordEvent('window_pair_status', { enabled, pairs: pairs.length }).catch(() => {});
       }
       if (message?.type === 'WINDOW_TRACK_STATUS_EVENT') {
         setWindowTrackState({
@@ -662,6 +673,9 @@ function AppInner() {
           speechManagerRef.current.resume();
         }
       }
+      if (message?.type === 'ASR_WS_STATE') {
+        telemetry.recordEvent('ws_state_change', { state: message.state }).catch(() => {});
+      }
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
@@ -857,17 +871,22 @@ function AppInner() {
   }, [allowedHosts, toast]);
 
   const onTogglePairing = useCallback(async (next: boolean) => {
+    if (pairingBusy) return;
+    setPairingBusy(true);
     try {
       const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_SET', enabled: next }).catch(() => null);
       if (!res) throw new Error('no-response');
       if (res?.ok === false) throw new Error(res.error || 'request failed');
       const enabled = typeof res.enabled === 'boolean' ? res.enabled : next;
       setPairingState((prev) => ({ ...prev, enabled }));
+      telemetry.recordEvent('window_pair_toggle', { enabled }).catch(() => {});
       toast.push(enabled ? 'Window pairing enabled' : 'Window pairing disabled');
     } catch {
       toast.push('Pairing toggle failed');
+    } finally {
+      setPairingBusy(false);
     }
-  }, [toast]);
+  }, [pairingBusy, toast]);
 
   const onTestMappings = useCallback(async () => {
     if (!host) { toast.push('No host detected'); return; }
@@ -1427,7 +1446,7 @@ ${section.join(' ')}`;
   const pairingEnabled = pairingState.enabled;
   const pairingSummary = pairingState.pairs.length
     ? `${pairingState.pairs.length} window${pairingState.pairs.length === 1 ? '' : 's'} paired`
-    : 'No active pairs yet';
+    : pairingState.enabled ? 'Waiting for eligible host window' : 'No active pairs yet';
 
   const wsMonitor = isDevelopmentBuild && (
     <div className="text-[11px] text-slate-500 space-y-1">
@@ -1607,6 +1626,10 @@ ${section.join(' ')}`;
               wsState={wsState}
               host={host}
               hostAllowed={!!host && allowedHosts.includes(host)}
+              pairingEnabled={pairingState.enabled}
+              pairingSummary={pairingSummary}
+              pairingBusy={pairingBusy}
+              onTogglePairing={onTogglePairing}
               onToggleFocus={() => setFocusMode((v) => !v)}
               onOpacity={setOpacity}
               onOpenSettings={() => setSettingsOpen((v) => !v)}

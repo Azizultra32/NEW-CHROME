@@ -11,6 +11,10 @@ type Props = {
   onToggleFocus: () => void;
   onOpacity: (v: number) => void;
   onOpenSettings?: () => void;
+  pairingEnabled?: boolean;
+  pairingSummary?: string;
+  pairingBusy?: boolean;
+  onTogglePairing?: (next: boolean) => void;
 };
 
 const modeClasses = {
@@ -26,7 +30,22 @@ const wsClasses = {
   disconnected: 'bg-slate-200 text-slate-700'
 } as const;
 
-export const Header: React.FC<Props> = ({ recording, focusMode, opacity, mode, wsState, host, hostAllowed, onToggleFocus, onOpacity, onOpenSettings }) => {
+export const Header: React.FC<Props> = ({
+  recording,
+  focusMode,
+  opacity,
+  mode,
+  wsState,
+  host,
+  hostAllowed,
+  onToggleFocus,
+  onOpacity,
+  onOpenSettings,
+  pairingEnabled,
+  pairingSummary,
+  pairingBusy,
+  onTogglePairing
+}) => {
   return (
     <header className="flex items-center gap-3">
       <h1 className="text-lg font-semibold">AssistMD</h1>
@@ -45,6 +64,16 @@ export const Header: React.FC<Props> = ({ recording, focusMode, opacity, mode, w
         </span>
       )}
       <div className="ml-auto flex items-center gap-3 text-xs">
+        {typeof pairingEnabled === 'boolean' && onTogglePairing && (
+          <button
+            className={`px-2 py-1 rounded-md border ${pairingEnabled ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-700 border-slate-300'}`}
+            onClick={() => onTogglePairing(!pairingEnabled)}
+            title={pairingSummary || 'Toggle window pairing'}
+            disabled={pairingBusy}
+          >
+            {pairingEnabled ? 'Pairing On' : 'Pairing Off'}
+          </button>
+        )}
         <button
           className={`px-2 py-1 rounded-md border ${focusMode ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-700 border-slate-300'}`}
           onClick={onToggleFocus}
