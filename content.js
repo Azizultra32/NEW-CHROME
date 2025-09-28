@@ -162,3 +162,153 @@
     }
   });
 })();
+
+// Pairing dock ---------------------------------------------------------------
+(function(){
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) return;
+  const DOCK_ID = '__assist_pairing_dock';
+  const doc = document;
+  let dock, header, status, btn, dot;
+  const state = { enabled: false, pairs: [], busy: false };
+  let listenerAttached = false;
+
+  function ensureDock() {
+    if (!doc.body) return false;
+    if (dock && doc.body.contains(dock)) return true;
+    const existing = doc.getElementById(DOCK_ID);
+    if (existing) {
+      dock = existing;
+      header = dock.querySelector('[data-assist-header]');
+      status = dock.querySelector('[data-assist-status]');
+      btn = dock.querySelector('[data-assist-toggle]');
+      dot = dock.querySelector('[data-assist-dot]');
+      return !!btn && !!status && !!dot;
+    }
+    dock = doc.createElement('div');
+    dock.id = DOCK_ID;
+    Object.assign(dock.style, {
+      position: 'fixed',
+      bottom: '20px',
+      right: '20px',
+      zIndex: 2147483646,
+      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      fontSize: '11px',
+      color: '#0f172a',
+      background: 'rgba(255,255,255,0.94)',
+      border: '1px solid rgba(15,23,42,0.15)',
+      borderRadius: '10px',
+      boxShadow: '0 6px 24px rgba(15,23,42,0.18)',
+      padding: '8px 10px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      minWidth: '160px'
+    });
+    header = doc.createElement('div');
+    header.setAttribute('data-assist-header', '1');
+    header.textContent = 'AssistMD';
+    Object.assign(header.style, {
+      fontWeight: '600',
+      fontSize: '12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    });
+    dot = doc.createElement('span');
+    dot.setAttribute('data-assist-dot', '1');
+    Object.assign(dot.style, {
+      display: 'inline-block',
+      width: '8px',
+      height: '8px',
+      borderRadius: '50%',
+      background: '#94a3b8'
+    });
+    header.appendChild(dot);
+    status = doc.createElement('div');
+    status.setAttribute('data-assist-status', '1');
+    Object.assign(status.style, {
+      fontSize: '11px',
+      color: '#475569',
+      lineHeight: '1.3'
+    });
+    btn = doc.createElement('button');
+    btn.setAttribute('data-assist-toggle', '1');
+    btn.type = 'button';
+    btn.textContent = 'Pairing Off';
+    Object.assign(btn.style, {
+      fontSize: '11px',
+      padding: '6px 10px',
+      borderRadius: '6px',
+      border: '1px solid rgba(15,23,42,0.12)',
+      background: '#ffffff',
+      cursor: 'pointer'
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.borderColor = '#6366f1'; });
+    btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'rgba(15,23,42,0.12)'; });
+    dock.appendChild(header);
+    dock.appendChild(status);
+    dock.appendChild(btn);
+    doc.body.appendChild(dock);
+    return true;
+  }
+
+  function render() {
+    if (!btn || !status || !dot) return;
+    btn.textContent = state.enabled ? (state.busy ? 'Pairing…' : 'Pairing On') : (state.busy ? 'Pairing…' : 'Pairing Off');
+    btn.disabled = state.busy;
+    btn.style.background = state.enabled ? '#10b981' : '#ffffff';
+    btn.style.color = state.enabled ? '#ffffff' : '#0f172a';
+    dot.style.background = state.enabled ? '#10b981' : '#94a3b8';
+    if (!state.enabled) {
+      status.textContent = 'Pairing disabled';
+    } else if (state.pairs.length) {
+      const primary = state.pairs[0];
+      status.textContent = `Magnetized: ${primary.host || primary.title || 'window'}`;
+    } else {
+      status.textContent = 'Waiting for eligible host window';
+    }
+  }
+
+  function updateFromPayload(payload) {
+    if (!payload) return;
+    state.enabled = !!payload.enabled;
+    state.pairs = Array.isArray(payload.pairs) ? payload.pairs : [];
+    render();
+  }
+
+  function attachListeners() {
+    if (listenerAttached || !btn) return;
+    listenerAttached = true;
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type === 'WINDOW_PAIR_STATUS_EVENT') {
+        updateFromPayload(message);
+      }
+    });
+    btn.addEventListener('click', async () => {
+      if (state.busy) return;
+      state.busy = true;
+      render();
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_SET', enabled: !state.enabled });
+        if (res && res.ok !== false) {
+          state.enabled = typeof res.enabled === 'boolean' ? res.enabled : !state.enabled;
+        }
+      } catch {}
+      state.busy = false;
+      render();
+    });
+    chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_STATUS' }).then(updateFromPayload).catch(() => {});
+  }
+
+  function initDock() {
+    if (!ensureDock()) return false;
+    render();
+    attachListeners();
+    return true;
+  }
+
+  if (!initDock()) {
+    doc.addEventListener('DOMContentLoaded', () => { initDock(); }, { once: true });
+  }
+})();
+
