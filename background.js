@@ -1,5 +1,11 @@
 const TAG = 'BG';
 
+try {
+  importScripts('background/windowPairing.js', 'background/windowTracking.js');
+} catch (error) {
+  console.warn(`[${TAG}] failed to import pairing helpers`, error);
+}
+
 // Lightweight WS reconnection orchestrator (background-level)
 let asrActive = false;
 let lastEncounterId = null;
@@ -80,13 +86,22 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.action.onClicked.addListener(async (tab) => {
   try {
+    if (globalThis.windowTracker) {
+      const handled = await globalThis.windowTracker.focusExisting(tab.windowId);
+      if (handled) {
+        return;
+      }
+    }
+
     await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
     await chrome.sidePanel.open({ windowId: tab.windowId });
-    
+    globalThis.windowTracker?.recordSidepanelOpen?.(tab.windowId);
+
     // Show helpful notification about OS-level always-on-top
-    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-    const isWindows = navigator.platform.toUpperCase().indexOf('WIN') >= 0;
-    
+    const platform = navigator.platform?.toUpperCase?.() || '';
+    const isMac = platform.includes('MAC');
+    const isWindows = platform.includes('WIN');
+
     let message = 'Tip: Keep AssistMD on top using ';
     if (isMac) {
       message += 'Rectangle/Magnet window manager';
@@ -95,7 +110,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     } else {
       message += 'your window manager\'s always-on-top feature';
     }
-    
+
     // Only show tip once per session
     const shown = await chrome.storage.session.get('alwaysOnTopTipShown');
     if (!shown.alwaysOnTopTipShown) {
@@ -103,13 +118,16 @@ chrome.action.onClicked.addListener(async (tab) => {
         type: 'basic',
         iconUrl: 'icons/icon-48.png',
         title: 'AssistMD Tip',
-        message: message,
+        message,
         requireInteraction: false
       });
       await chrome.storage.session.set({ alwaysOnTopTipShown: true });
     }
   } catch {
-    chrome.windows.create({ url: chrome.runtime.getURL('sidepanel.html'), type: 'popup', width: 420, height: 740 });
+    try {
+      const popup = await chrome.windows.create({ url: chrome.runtime.getURL('sidepanel.html'), type: 'popup', width: 420, height: 740 });
+      globalThis.windowTracker?.recordSidepanelPopup?.(popup.id);
+    } catch {}
   }
 });
 
@@ -230,6 +248,37 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
         chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: msg.ms, forwarded: true }).catch(() => {});
       }
       send({ ok: true });
+      return;
+    }
+
+    if (msg?.type === 'WINDOW_PAIR_SET') {
+      try {
+        const manager = globalThis.windowManager;
+        if (!manager) { send({ ok: false, error: 'PAIRING_UNAVAILABLE' }); return; }
+        const enabled = await manager.setEnabled(!!msg.enabled);
+        send({ ok: true, enabled });
+      } catch (error) {
+        send({ ok: false, error: String(error) });
+      }
+      return;
+    }
+
+    if (msg?.type === 'WINDOW_PAIR_STATUS') {
+      try {
+        const manager = globalThis.windowManager;
+        if (!manager) { send({ ok: true, enabled: false, pairs: [] }); return; }
+        const state = await manager.getState();
+        send({ ok: true, ...state });
+      } catch (error) {
+        send({ ok: false, error: String(error) });
+      }
+      return;
+    }
+
+    if (msg?.type === 'WINDOW_TRACK_STATUS') {
+      const tracker = globalThis.windowTracker;
+      const state = tracker?.getState?.() || { sidepanelWindowId: null, lastKnown: null };
+      send({ ok: true, ...state });
       return;
     }
 

@@ -1,108 +1,269 @@
 // Window Pairing Manager for AssistMD
-// Keeps the assistant window "magnetized" to the EMR window
+// Keeps the assistant window "magnetized" to the EMR window when enabled
+
+const STORAGE_KEY_ENABLED = 'WINDOW_PAIR_ENABLED';
+const STORAGE_ALLOWED_HOSTS = 'ALLOWED_HOSTS';
+const EMR_PATTERNS = ['epic.com', 'cerner.com', 'athenahealth.com', 'ehr-test.html'];
 
 class WindowPairManager {
   constructor() {
+    this.enabled = false;
     this.pairs = new Map(); // emrWindowId -> assistantWindowId
+    this.assistants = new Map(); // assistantWindowId -> emrWindowId
+    this.metadata = new Map(); // emrWindowId -> { host, title, url }
+    this.allowedHosts = [];
+    this.initialized = false;
+    this.init();
     this.setupListeners();
   }
 
-  async createMagnetizedAssistant(emrWindowId) {
-    // Get EMR window dimensions
-    const emrWindow = await chrome.windows.get(emrWindowId);
-    
-    // Position assistant to the right of EMR window
-    const assistantWidth = 400;
-    const assistantWindow = await chrome.windows.create({
-      url: chrome.runtime.getURL("sidepanel.html?mode=popup"),
-      type: "popup", // No toolbar/address bar
-      width: assistantWidth,
-      height: emrWindow.height - 100, // Slightly shorter
-      left: emrWindow.left + emrWindow.width - 50, // Slight overlap
-      top: emrWindow.top + 50,
-      focused: false // Don't steal focus from EMR
-    });
-    
-    this.pairs.set(emrWindowId, assistantWindow.id);
-    
-    // Store pairing in storage for persistence
-    await chrome.storage.local.set({
-      [`window_pair_${emrWindowId}`]: assistantWindow.id
-    });
-    
-    return assistantWindow.id;
+  async init() {
+    try {
+      const store = await chrome.storage.local.get([STORAGE_KEY_ENABLED, STORAGE_ALLOWED_HOSTS]);
+      this.enabled = !!store[STORAGE_KEY_ENABLED];
+      if (Array.isArray(store[STORAGE_ALLOWED_HOSTS])) {
+        this.allowedHosts = store[STORAGE_ALLOWED_HOSTS];
+      }
+      if (this.enabled) {
+        await this.refreshPairs();
+      }
+      this.broadcastStatus();
+    } catch (error) {
+      console.warn('[WindowPair] init error', error);
+    } finally {
+      this.initialized = true;
+    }
   }
 
   setupListeners() {
-    // When EMR window moves, move assistant with it
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+      if (!tab || changeInfo.status !== 'complete') return;
+      this.checkForEMR(tab).catch(() => {});
+    });
+
+    chrome.tabs.onActivated.addListener(({ tabId }) => {
+      chrome.tabs.get(tabId).then((tab) => {
+        this.checkForEMR(tab).catch(() => {});
+      }).catch(() => {});
+    });
+
     chrome.windows.onBoundsChanged.addListener(async (windowId) => {
-      if (this.pairs.has(windowId)) {
+      if (!this.enabled || !this.pairs.has(windowId)) return;
+      try {
         const emrWindow = await chrome.windows.get(windowId);
         const assistantId = this.pairs.get(windowId);
-        
-        // Update assistant position to follow EMR
-        chrome.windows.update(assistantId, {
-          left: emrWindow.left + emrWindow.width - 50,
-          top: emrWindow.top + 50,
-          height: emrWindow.height - 100
+        if (!assistantId) return;
+        await chrome.windows.update(assistantId, {
+          left: (emrWindow.left ?? 0) + Math.max((emrWindow.width ?? 0) - this.getAssistantWidth(emrWindow.width), 0),
+          top: (emrWindow.top ?? 0) + 40,
+          height: Math.max((emrWindow.height ?? 0) - 80, 480)
         });
-      }
+      } catch {}
     });
 
-    // When EMR window closes, close assistant
     chrome.windows.onRemoved.addListener((windowId) => {
       if (this.pairs.has(windowId)) {
-        const assistantId = this.pairs.get(windowId);
-        chrome.windows.remove(assistantId);
-        this.pairs.delete(windowId);
-        chrome.storage.local.remove([`window_pair_${windowId}`]);
+        this.teardownPair(windowId).catch(() => {});
+        return;
+      }
+      const parentId = this.assistants.get(windowId);
+      if (parentId) {
+        this.assistants.delete(windowId);
+        this.pairs.delete(parentId);
+        this.metadata.delete(parentId);
+        this.broadcastStatus();
       }
     });
 
-    // When switching between EMR windows, bring assistant along
-    chrome.windows.onFocusChanged.addListener(async (windowId) => {
-      if (windowId !== chrome.windows.WINDOW_ID_NONE && this.pairs.has(windowId)) {
-        const assistantId = this.pairs.get(windowId);
-        // Bring assistant window to front with EMR
-        chrome.windows.update(assistantId, { focused: true });
-        // Then refocus EMR
-        setTimeout(() => {
-          chrome.windows.update(windowId, { focused: true });
-        }, 100);
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      if (STORAGE_ALLOWED_HOSTS in changes) {
+        const next = changes[STORAGE_ALLOWED_HOSTS]?.newValue;
+        this.allowedHosts = Array.isArray(next) ? next : [];
+        if (this.enabled) {
+          this.refreshPairs().catch(() => {});
+        }
+      }
+      if (STORAGE_KEY_ENABLED in changes) {
+        const nextEnabled = !!changes[STORAGE_KEY_ENABLED]?.newValue;
+        if (nextEnabled !== this.enabled) {
+          this.setEnabled(nextEnabled).catch(() => {});
+        }
       }
     });
   }
 
-  // Check if current tab is EMR and needs assistant
+  getAssistantWidth(emrWidth = 1200) {
+    const clamped = Math.max(320, Math.min(420, emrWidth * 0.32));
+    return Math.round(clamped);
+  }
+
   async checkForEMR(tab) {
-    const emrPatterns = [
-      'epic.com',
-      'cerner.com', 
-      'athenahealth.com',
-      'ehr-test.html',
-      // Add more EMR patterns
-    ];
-    
-    const isEMR = emrPatterns.some(pattern => 
-      tab.url && tab.url.includes(pattern)
-    );
-    
-    if (isEMR && !this.pairs.has(tab.windowId)) {
-      // Auto-open assistant for EMR windows
-      await this.createMagnetizedAssistant(tab.windowId);
+    if (!this.enabled || !tab || !tab.windowId) return;
+    const info = this.analyzeTab(tab);
+    if (!info) {
+      if (this.pairs.has(tab.windowId)) {
+        await this.teardownPair(tab.windowId);
+      }
+      return;
     }
+    if (this.pairs.has(tab.windowId)) {
+      this.metadata.set(tab.windowId, info);
+      this.broadcastStatus();
+      return;
+    }
+    await this.createMagnetizedAssistant(tab.windowId, info);
+  }
+
+  analyzeTab(tab) {
+    if (!tab || !tab.url) return null;
+    const url = tab.url;
+    let host = '';
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return null;
+    }
+    if (!this.isHostAllowed(host)) return null;
+    const lower = url.toLowerCase();
+    const matches = EMR_PATTERNS.some((pattern) => lower.includes(pattern));
+    if (!matches) return null;
+    return {
+      host,
+      title: tab.title || host,
+      url
+    };
+  }
+
+  isHostAllowed(host) {
+    if (!Array.isArray(this.allowedHosts) || this.allowedHosts.length === 0) return true;
+    return this.allowedHosts.includes(host);
+  }
+
+  async createMagnetizedAssistant(emrWindowId, info) {
+    if (!this.enabled || this.pairs.has(emrWindowId)) return this.pairs.get(emrWindowId) || null;
+    let emrWindow;
+    try {
+      emrWindow = await chrome.windows.get(emrWindowId);
+    } catch (error) {
+      console.warn('[WindowPair] failed to locate EMR window', error);
+      return null;
+    }
+    try {
+      const width = this.getAssistantWidth(emrWindow.width ?? 1200);
+      const assistantWindow = await chrome.windows.create({
+        url: chrome.runtime.getURL('sidepanel.html?mode=popup'),
+        type: 'popup',
+        width,
+        height: Math.max((emrWindow.height ?? 0) - 80, 520),
+        left: (emrWindow.left ?? 0) + Math.max((emrWindow.width ?? 0) - width - 20, 0),
+        top: (emrWindow.top ?? 0) + 40,
+        focused: false
+      });
+      this.pairs.set(emrWindowId, assistantWindow.id);
+      this.assistants.set(assistantWindow.id, emrWindowId);
+      this.metadata.set(emrWindowId, info || {});
+      this.broadcastStatus();
+      return assistantWindow.id;
+    } catch (error) {
+      console.warn('[WindowPair] failed to create assistant window', error);
+      return null;
+    }
+  }
+
+  async teardownPair(emrWindowId) {
+    const assistantId = this.pairs.get(emrWindowId);
+    this.pairs.delete(emrWindowId);
+    this.metadata.delete(emrWindowId);
+    if (assistantId) {
+      this.assistants.delete(assistantId);
+      try { await chrome.windows.remove(assistantId); } catch {}
+    }
+    this.broadcastStatus();
+  }
+
+  async refreshPairs() {
+    if (!this.enabled) {
+      await this.disableAll();
+      return;
+    }
+    try {
+      const windows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+      const seen = new Set();
+      for (const win of windows) {
+        const tabs = win.tabs || [];
+        const activeTab = tabs.find((t) => t.active) || tabs[0];
+        const info = this.analyzeTab(activeTab);
+        if (info) {
+          seen.add(win.id);
+          this.metadata.set(win.id, info);
+          if (!this.pairs.has(win.id)) {
+            await this.createMagnetizedAssistant(win.id, info);
+          }
+        }
+      }
+      for (const emrId of Array.from(this.pairs.keys())) {
+        if (!seen.has(emrId)) {
+          await this.teardownPair(emrId);
+        }
+      }
+      this.broadcastStatus();
+    } catch (error) {
+      console.warn('[WindowPair] refresh error', error);
+    }
+  }
+
+  async disableAll() {
+    const ids = Array.from(this.pairs.keys());
+    await Promise.all(ids.map((id) => this.teardownPair(id).catch(() => {})));
+    this.pairs.clear();
+    this.assistants.clear();
+    this.metadata.clear();
+    this.broadcastStatus();
+  }
+
+  async setEnabled(next) {
+    const desired = !!next;
+    if (desired === this.enabled) return this.enabled;
+    this.enabled = desired;
+    await chrome.storage.local.set({ [STORAGE_KEY_ENABLED]: desired });
+    if (desired) {
+      await this.refreshPairs();
+    } else {
+      await this.disableAll();
+    }
+    this.broadcastStatus();
+    return this.enabled;
+  }
+
+  isEnabled() {
+    return this.enabled;
+  }
+
+  async getState() {
+    return {
+      enabled: this.enabled,
+      pairs: Array.from(this.metadata.entries()).map(([emrWindowId, meta]) => ({
+        emrWindowId,
+        assistantWindowId: this.pairs.get(emrWindowId) || null,
+        ...meta
+      }))
+    };
+  }
+
+  broadcastStatus() {
+    const payload = {
+      type: 'WINDOW_PAIR_STATUS_EVENT',
+      enabled: this.enabled,
+      pairs: Array.from(this.metadata.entries()).map(([emrWindowId, meta]) => ({
+        emrWindowId,
+        assistantWindowId: this.pairs.get(emrWindowId) || null,
+        ...meta
+      }))
+    };
+    chrome.runtime.sendMessage(payload).catch(() => {});
   }
 }
 
-// Initialize on extension load
-const windowManager = new WindowPairManager();
-
-// Auto-detect EMR tabs
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete') {
-    windowManager.checkForEMR(tab);
-  }
-});
-
-// Export for use in background.js
-globalThis.windowManager = windowManager;
+// Initialize on extension load and expose globally
+globalThis.windowManager = new WindowPairManager();

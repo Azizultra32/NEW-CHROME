@@ -50,6 +50,9 @@ async function copyStatic() {
   await Promise.all(files.map(async (file) => {
     await cp(join(root, file), join(distDir, file));
   }));
+  try {
+    await cp(join(root, 'src/background'), join(distDir, 'background'), { recursive: true });
+  } catch {}
   await cp(join(root, 'icons'), join(distDir, 'icons'), { recursive: true });
   try {
     await cp(join(root, 'public', 'worklet.js'), join(distDir, 'worklet.js'));

@@ -13,6 +13,7 @@ import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert, getFi
 import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
 import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
+import { WindowIndicator } from './components/WindowIndicator';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
@@ -53,6 +54,8 @@ function AppInner() {
   const [liveWords, setLiveWords] = useState('');
   const [pttActive, setPttActive] = useState(false);
   const pttActiveRef = useRef(false);
+  const [pairingState, setPairingState] = useState<{ enabled: boolean; pairs: Array<{ host?: string; title?: string; url?: string }> }>({ enabled: false, pairs: [] });
+  const [windowTrackState, setWindowTrackState] = useState<{ sidepanelWindowId: number | null; lastKnown: { title?: string; url?: string } | null }>({ sidepanelWindowId: null, lastKnown: null });
 
   const defaultTemplates: Record<Section, string> = {
     PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
@@ -174,6 +177,52 @@ function AppInner() {
         try { toast.push('Loaded last transcript'); } catch {}
       }
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const syncStatuses = async () => {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_STATUS' }).catch(() => null);
+        if (mounted && res && typeof res.enabled === 'boolean') {
+          setPairingState({
+            enabled: res.enabled,
+            pairs: Array.isArray(res.pairs) ? res.pairs : []
+          });
+        }
+      } catch {}
+      try {
+        const track = await chrome.runtime.sendMessage({ type: 'WINDOW_TRACK_STATUS' }).catch(() => null);
+        if (mounted && track) {
+          setWindowTrackState({
+            sidepanelWindowId: typeof track.sidepanelWindowId === 'number' ? track.sidepanelWindowId : null,
+            lastKnown: track.lastKnown || null
+          });
+        }
+      } catch {}
+    };
+    syncStatuses();
+
+    const handler = (message: any) => {
+      if (!mounted) return;
+      if (message?.type === 'WINDOW_PAIR_STATUS_EVENT') {
+        setPairingState({
+          enabled: !!message.enabled,
+          pairs: Array.isArray(message.pairs) ? message.pairs : []
+        });
+      }
+      if (message?.type === 'WINDOW_TRACK_STATUS_EVENT') {
+        setWindowTrackState({
+          sidepanelWindowId: typeof message.sidepanelWindowId === 'number' ? message.sidepanelWindowId : null,
+          lastKnown: message.lastKnown || null
+        });
+      }
+    };
+    chrome.runtime.onMessage.addListener(handler);
+    return () => {
+      mounted = false;
+      chrome.runtime.onMessage.removeListener(handler);
+    };
   }, []);
 
   // Detect recovery snapshot and surface banner if mappings missing
@@ -807,6 +856,19 @@ function AppInner() {
     } catch { toast.push('Failed to update allowlist'); }
   }, [allowedHosts, toast]);
 
+  const onTogglePairing = useCallback(async (next: boolean) => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_SET', enabled: next }).catch(() => null);
+      if (!res) throw new Error('no-response');
+      if (res?.ok === false) throw new Error(res.error || 'request failed');
+      const enabled = typeof res.enabled === 'boolean' ? res.enabled : next;
+      setPairingState((prev) => ({ ...prev, enabled }));
+      toast.push(enabled ? 'Window pairing enabled' : 'Window pairing disabled');
+    } catch {
+      toast.push('Pairing toggle failed');
+    }
+  }, [toast]);
+
   const onTestMappings = useCallback(async () => {
     if (!host) { toast.push('No host detected'); return; }
     const sections: Section[] = ['PLAN','HPI','ROS','EXAM'];
@@ -1362,6 +1424,11 @@ ${section.join(' ')}`;
     color: UI.colors.text
   }), [focusMode, opacity]);
 
+  const pairingEnabled = pairingState.enabled;
+  const pairingSummary = pairingState.pairs.length
+    ? `${pairingState.pairs.length} window${pairingState.pairs.length === 1 ? '' : 's'} paired`
+    : 'No active pairs yet';
+
   const wsMonitor = isDevelopmentBuild && (
     <div className="text-[11px] text-slate-500 space-y-1">
       {wsEvents.map((e, i) => (<div key={i}>• {e}</div>))}
@@ -1544,6 +1611,11 @@ ${section.join(' ')}`;
               onOpacity={setOpacity}
               onOpenSettings={() => setSettingsOpen((v) => !v)}
             />
+            <WindowIndicator
+              pairingEnabled={pairingEnabled}
+              pairingSummary={pairingSummary}
+              lastKnown={windowTrackState.lastKnown}
+            />
             {(recording || wsState !== 'disconnected') && (
               <div className="rounded-md border border-slate-200 bg-white/90 px-2 py-1 text-[12px] text-slate-700" style={{maxHeight: 56, overflow: 'hidden'}}>
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2 align-middle" />
@@ -1635,6 +1707,13 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
+                <div className="text-sm font-medium mt-3">Window Management</div>
+                <div className="text-[12px] text-slate-600">Keep AssistMD magnetized next to allowed EHR windows.</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Auto-open floating assistant window</span>
+                  <input type="checkbox" checked={pairingEnabled} onChange={(e) => onTogglePairing(e.target.checked)} />
+                </label>
+                <div className="text-[11px] text-slate-500">{pairingEnabled ? pairingSummary : 'Disabled — enable to magnetize on allowed hosts.'}</div>
                 <div className="text-sm font-medium mt-3">Fallback Selectors</div>
                 <div className="text-[12px] text-slate-600">Optional comma‑separated selectors used if the primary mapping is missing.</div>
                 {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
