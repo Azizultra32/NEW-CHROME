@@ -13,7 +13,8 @@
     "test:unit": "vitest run",
     "dev": "node scripts/dev.mjs",
     "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
-    "test:e2e": "playwright test || echo 'Playwright not installed in CI'"
+    "test:e2e": "playwright test || echo 'Playwright not installed in CI'",
+    "test:e2e:chrome": "node scripts/run-extension-e2e.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

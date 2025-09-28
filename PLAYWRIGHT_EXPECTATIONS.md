@@ -70,10 +70,10 @@ npm run start
 **Terminal 2 - Playwright Tests:**
 ```bash
 cd /Users/ali/CODEX-AIEWEB+/CascadeProjects/windsurf-project
-RUN_EXTENSION_E2E=true npx playwright test --headed
+npm run test:e2e:chrome
 
 # Or run specific test:
-RUN_EXTENSION_E2E=true npx playwright test extension.spec.ts --headed
+npm run test:e2e:chrome -- extension.spec.ts
 ```
 
 ## Debugging Tips

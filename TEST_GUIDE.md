@@ -45,7 +45,12 @@ The E2E tests are failing due to Chrome launch timeouts on macOS. Common fixes:
 ### Option 1: Use Regular Chrome
 ```bash
 # Use system Chrome instead of Playwright's Chromium
-RUN_EXTENSION_E2E=true npx playwright test --browser=chrome --headed
+RUN_EXTENSION_E2E=true PLAYWRIGHT_CHANNEL=chrome npx playwright test --headed
+```
+
+### Option 1b: Convenience Script
+```bash
+npm run test:e2e:chrome
 ```
 
 ### Option 2: Increase Timeout

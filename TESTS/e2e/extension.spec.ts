@@ -19,6 +19,7 @@ test.describe('Extension smoke (MV3)', () => {
     const dist = join(root, 'dist');
     context = await chromium.launchPersistentContext('', {
       headless: false,
+      channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome',
       args: [
         `--disable-extensions-except=${dist}`,
         `--load-extension=${dist}`,

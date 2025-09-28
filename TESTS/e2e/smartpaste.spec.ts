@@ -19,6 +19,7 @@ test.describe('AssistMD Smart Paste flows', () => {
     const dist = join(root, 'dist');
     context = await chromium.launchPersistentContext('', {
       headless: false,
+      channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome',
       args: [
         `--disable-extensions-except=${dist}`,
         `--load-extension=${dist}`,
