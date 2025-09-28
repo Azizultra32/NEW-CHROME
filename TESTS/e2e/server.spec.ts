@@ -1,12 +1,17 @@
 import { test, expect, request } from '@playwright/test';
 import { spawn } from 'child_process';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { createConnection } from 'net';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 test.describe('Mock server endpoints', () => {
   let proc: any;
 
   test.beforeAll(async () => {
-    proc = spawn('node', ['server.js'], { cwd: __dirname + '/../../' });
-    await new Promise((res) => setTimeout(res, 500));
+    proc = spawn('node', ['server.js'], { cwd: join(__dirname, '../../'), stdio: 'ignore' });
+    await waitForPort(8080, 5000);
   });
 
   test.afterAll(async () => {
@@ -27,3 +32,21 @@ test.describe('Mock server endpoints', () => {
   });
 });
 
+async function waitForPort(port: number, timeoutMs: number) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ready = await new Promise<boolean>((resolve) => {
+      const socket = createConnection(port, '127.0.0.1');
+      socket.once('connect', () => {
+        socket.end();
+        resolve(true);
+      });
+      socket.once('error', () => {
+        resolve(false);
+      });
+    });
+    if (ready) return;
+    await new Promise((res) => setTimeout(res, 200));
+  }
+  throw new Error(`Mock server on port ${port} did not start in ${timeoutMs}ms`);
+}

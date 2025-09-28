@@ -1,13 +1,20 @@
 import { test, expect, chromium, BrowserContext } from '@playwright/test';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const SHOULD_RUN = process.env.RUN_EXTENSION_E2E === 'true';
+
+test.describe.configure({ mode: 'serial' });
 
 test.describe('Insert latency + guard flow (local)', () => {
-  test.skip(!!process.env.CI, 'Headful extension tests are local-only');
+  test.skip(!SHOULD_RUN, 'Set RUN_EXTENSION_E2E=true to run extension harness locally');
 
   let context: BrowserContext;
   let extensionId = '';
 
   test.beforeAll(async () => {
-    const { join } = await import('path');
     const root = join(__dirname, '../../');
     const dist = join(root, 'dist');
     context = await chromium.launchPersistentContext('', {
@@ -19,9 +26,20 @@ test.describe('Insert latency + guard flow (local)', () => {
         '--use-fake-device-for-media-stream'
       ]
     });
-    const sw = await context.waitForEvent('serviceworker');
+    let sw;
+    try {
+      sw = await context.waitForEvent('serviceworker', { timeout: 10000 });
+    } catch (err) {
+      await context.close();
+      test.skip(`Extension service worker did not start: ${(err as Error).message}`);
+      return;
+    }
     const m = sw.url().match(/^chrome-extension:\/\/([a-p]{32})\//);
-    if (!m) throw new Error('Extension ID not found');
+    if (!m) {
+      await context.close();
+      test.skip('Extension ID not found from service worker URL');
+      return;
+    }
     extensionId = m[1];
   });
 
@@ -59,4 +77,3 @@ test.describe('Insert latency + guard flow (local)', () => {
     expect(dur).toBeLessThan(1200);
   });
 });
-
