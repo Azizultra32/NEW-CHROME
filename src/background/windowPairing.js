@@ -107,6 +107,9 @@ class WindowPairManager {
       }
       return;
     }
+    if (tab.id) {
+      await this.injectDock(tab.id);
+    }
     if (this.pairs.has(tab.windowId)) {
       this.metadata.set(tab.windowId, info);
       this.broadcastStatus();
@@ -197,6 +200,9 @@ class WindowPairManager {
         if (info) {
           seen.add(win.id);
           this.metadata.set(win.id, info);
+          if (activeTab?.id) {
+            await this.injectDock(activeTab.id);
+          }
           if (!this.pairs.has(win.id)) {
             await this.createMagnetizedAssistant(win.id, info);
           }
@@ -262,6 +268,15 @@ class WindowPairManager {
       }))
     };
     chrome.runtime.sendMessage(payload).catch(() => {});
+  }
+
+  async injectDock(tabId) {
+    if (!tabId) return;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    } catch (error) {
+      // Ignore permissions errors; dock will appear once host is allowed.
+    }
   }
 }
 
