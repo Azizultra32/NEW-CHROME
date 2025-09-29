@@ -167,6 +167,23 @@ function AppInner() {
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
 
+  // Request tabs permission on mount to enable window detection
+  useEffect(() => {
+    (async () => {
+      try {
+        const permissions = chrome.permissions as any;
+        if (permissions?.request) {
+          const hasTabsPermission = await permissions.contains({ permissions: ['tabs'] }).catch(() => false);
+          if (!hasTabsPermission) {
+            await permissions.request({ permissions: ['tabs'] }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to request tabs permission:', e);
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     if (wsState === 'connecting') {
       setCommandFeedback('Connecting to transcriber…', true);

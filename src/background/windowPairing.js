@@ -24,9 +24,8 @@ class WindowPairManager {
       if (Array.isArray(store[STORAGE_ALLOWED_HOSTS])) {
         this.allowedHosts = store[STORAGE_ALLOWED_HOSTS];
       }
-      if (this.enabled) {
-        await this.refreshPairs();
-      }
+      // Always refresh to inject docks on all pages
+      await this.refreshPairs();
       this.broadcastStatus();
     } catch (error) {
       console.warn('[WindowPair] init error', error);
@@ -99,7 +98,18 @@ class WindowPairManager {
   }
 
   async checkForEMR(tab) {
-    if (!this.enabled || !tab || !tab.windowId) return;
+    if (!tab || !tab.windowId) return;
+    
+    // Always inject dock on valid web pages (not chrome:// or extension pages)
+    if (tab.id && tab.url && !tab.url.startsWith('chrome://') && 
+        !tab.url.startsWith('chrome-extension://') && 
+        !tab.url.startsWith('edge://') && 
+        !tab.url.startsWith('about:')) {
+      await this.injectDock(tab.id);
+    }
+    
+    if (!this.enabled) return;
+    
     const info = this.analyzeTab(tab);
     if (!info) {
       if (this.pairs.has(tab.windowId)) {
@@ -107,9 +117,7 @@ class WindowPairManager {
       }
       return;
     }
-    if (tab.id) {
-      await this.injectDock(tab.id);
-    }
+    
     if (this.pairs.has(tab.windowId)) {
       this.metadata.set(tab.windowId, info);
       this.broadcastStatus();
@@ -188,12 +196,28 @@ class WindowPairManager {
   }
 
   async refreshPairs() {
-    if (!this.enabled) {
-      await this.disableAll();
-      return;
-    }
     try {
       const windows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+      
+      // First, inject dock on all valid web pages
+      for (const win of windows) {
+        const tabs = win.tabs || [];
+        for (const tab of tabs) {
+          if (tab.id && tab.url && 
+              !tab.url.startsWith('chrome://') && 
+              !tab.url.startsWith('chrome-extension://') && 
+              !tab.url.startsWith('edge://') && 
+              !tab.url.startsWith('about:')) {
+            await this.injectDock(tab.id);
+          }
+        }
+      }
+      
+      if (!this.enabled) {
+        await this.disableAll();
+        return;
+      }
+      
       const seen = new Set();
       for (const win of windows) {
         const tabs = win.tabs || [];
@@ -202,9 +226,6 @@ class WindowPairManager {
         if (info) {
           seen.add(win.id);
           this.metadata.set(win.id, info);
-          if (activeTab?.id) {
-            await this.injectDock(activeTab.id);
-          }
           if (!this.pairs.has(win.id)) {
             await this.createMagnetizedAssistant(win.id, info);
           }

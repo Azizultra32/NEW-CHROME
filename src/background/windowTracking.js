@@ -7,7 +7,24 @@ class WindowTracker {
     this.setupListeners();
   }
 
-  setupListeners() {
+  async setupListeners() {
+    // Check if we have tabs permission first
+    try {
+      const hasPermission = await chrome.permissions.contains({ permissions: ['tabs'] });
+      if (!hasPermission) {
+        console.warn('WindowTracker: tabs permission not granted yet');
+        // Listen for permission changes
+        chrome.permissions.onAdded?.addListener((permissions) => {
+          if (permissions.permissions?.includes('tabs')) {
+            this.setupListeners(); // Re-setup when permission granted
+          }
+        });
+        return;
+      }
+    } catch (e) {
+      console.warn('WindowTracker: Failed to check tabs permission:', e);
+    }
+
     chrome.windows.onFocusChanged.addListener(async (windowId) => {
       if (windowId === chrome.windows.WINDOW_ID_NONE) return;
       try {
@@ -21,22 +38,25 @@ class WindowTracker {
       } catch {}
     });
 
-    chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        if (tab?.url && !tab.url.startsWith('chrome-extension://')) {
-          this.lastKnown = {
-            windowId,
-            tabId,
-            title: tab.title || '',
-            url: tab.url
-          };
-          this.broadcast();
-        }
-      } catch {}
-    });
+    if (chrome.tabs?.onActivated) {
+      chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab?.url && !tab.url.startsWith('chrome-extension://')) {
+            this.lastKnown = {
+              windowId,
+              tabId,
+              title: tab.title || '',
+              url: tab.url
+            };
+            this.broadcast();
+          }
+        } catch {}
+      });
+    }
 
-    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (chrome.tabs?.onUpdated) {
+      chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (!tab || tabId !== this.lastKnown?.tabId) return;
       if (changeInfo.title) {
         this.lastKnown = { ...this.lastKnown, title: changeInfo.title };
