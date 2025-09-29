@@ -127,10 +127,12 @@ class WindowPairManager {
     } catch {
       return null;
     }
-    if (!this.isHostAllowed(host)) return null;
+    const allowlistActive = Array.isArray(this.allowedHosts) && this.allowedHosts.length > 0;
+    const explicitlyAllowed = allowlistActive ? this.allowedHosts.includes(host) : false;
+    if (allowlistActive && !explicitlyAllowed) return null;
     const lower = url.toLowerCase();
     const matches = EMR_PATTERNS.some((pattern) => lower.includes(pattern));
-    if (!matches) return null;
+    if (!matches && !explicitlyAllowed) return null;
     return {
       host,
       title: tab.title || host,
