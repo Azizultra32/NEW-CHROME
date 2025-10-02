@@ -9,9 +9,12 @@
     "build:clean": "npm run clean && npm run build",
     "setup": "npm ci && npm run build",
     "start": "node server.js",
+    "start:backend": "cd backend && npm start",
+    "start:mock": "node server.js",
     "lint": "tsc --noEmit",
     "test:unit": "vitest run",
     "dev": "node scripts/dev.mjs",
+    "dev:backend": "cd backend && npm run dev",
     "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
     "test:e2e": "playwright test || echo 'Playwright not installed in CI'",
     "test:e2e:chrome": "node scripts/run-extension-e2e.mjs"

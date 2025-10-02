@@ -193,11 +193,11 @@
       zIndex: 2147483646,
       fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       fontSize: '11px',
-      color: '#0f172a',
-      background: 'rgba(255,255,255,0.94)',
-      border: '1px solid rgba(15,23,42,0.15)',
+      color: '#ffffff',
+      background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+      border: '1px solid rgba(139,92,246,0.3)',
       borderRadius: '10px',
-      boxShadow: '0 6px 24px rgba(15,23,42,0.18)',
+      boxShadow: '0 8px 32px rgba(99,102,241,0.35)',
       padding: '8px 10px',
       display: 'flex',
       flexDirection: 'column',
@@ -212,7 +212,8 @@
       fontSize: '12px',
       display: 'flex',
       alignItems: 'center',
-      gap: '6px'
+      gap: '6px',
+      color: '#ffffff'
     });
     dot = doc.createElement('span');
     dot.setAttribute('data-assist-dot', '1');
@@ -221,14 +222,14 @@
       width: '8px',
       height: '8px',
       borderRadius: '50%',
-      background: '#94a3b8'
+      background: '#ffffff'
     });
     header.appendChild(dot);
     status = doc.createElement('div');
     status.setAttribute('data-assist-status', '1');
     Object.assign(status.style, {
       fontSize: '11px',
-      color: '#475569',
+      color: 'rgba(255,255,255,0.9)',
       lineHeight: '1.3'
     });
     btn = doc.createElement('button');
@@ -239,12 +240,20 @@
       fontSize: '11px',
       padding: '6px 10px',
       borderRadius: '6px',
-      border: '1px solid rgba(15,23,42,0.12)',
-      background: '#ffffff',
-      cursor: 'pointer'
+      border: '1px solid rgba(255,255,255,0.3)',
+      background: 'rgba(255,255,255,0.2)',
+      color: '#ffffff',
+      cursor: 'pointer',
+      backdropFilter: 'blur(10px)'
     });
-    btn.addEventListener('mouseenter', () => { btn.style.borderColor = '#6366f1'; });
-    btn.addEventListener('mouseleave', () => { btn.style.borderColor = 'rgba(15,23,42,0.12)'; });
+    btn.addEventListener('mouseenter', () => { 
+      btn.style.background = 'rgba(255,255,255,0.3)';
+      btn.style.borderColor = 'rgba(255,255,255,0.5)';
+    });
+    btn.addEventListener('mouseleave', () => { 
+      btn.style.background = 'rgba(255,255,255,0.2)';
+      btn.style.borderColor = 'rgba(255,255,255,0.3)';
+    });
     dock.appendChild(header);
     dock.appendChild(status);
     dock.appendChild(btn);
@@ -256,9 +265,9 @@
     if (!btn || !status || !dot) return;
     btn.textContent = state.enabled ? (state.busy ? 'Pairing…' : 'Pairing On') : (state.busy ? 'Pairing…' : 'Pairing Off');
     btn.disabled = state.busy;
-    btn.style.background = state.enabled ? '#10b981' : '#ffffff';
-    btn.style.color = state.enabled ? '#ffffff' : '#0f172a';
-    dot.style.background = state.enabled ? '#10b981' : '#94a3b8';
+    btn.style.background = state.enabled ? '#10b981' : 'rgba(255,255,255,0.2)';
+    btn.style.color = '#ffffff';
+    dot.style.background = state.enabled ? '#10b981' : '#ffffff';
     if (!state.enabled) {
       status.textContent = 'Pairing disabled';
     } else if (state.pairs.length) {

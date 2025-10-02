@@ -4,7 +4,7 @@ class WindowTracker {
   constructor() {
     this.sidepanelWindowId = null;
     this.lastKnown = null; // { windowId, tabId, title, url }
-    this.setupListeners();
+    this.setupListeners().catch(() => {});
   }
 
   async setupListeners() {

@@ -1,0 +1,22 @@
+{
+  "name": "assistmd-backend",
+  "version": "1.0.0",
+  "description": "Armada backend with OpenAI Realtime API integration",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "echo \"Tests coming soon\" && exit 0"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3",
+    "cors": "^2.8.5",
+    "openai": "^4.47.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
