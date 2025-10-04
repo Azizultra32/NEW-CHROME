@@ -76,6 +76,7 @@ let wsUrl = null;
 let hbTimer = null;
 let retryTimer = null;
 let retryDelayMs = 1000; // exponential backoff up to 10s
+let currentEncounterId = null;
 
 let cfg = { wsUrl: null, headers: {} };
 let suppressUntil = 0;
@@ -216,7 +217,12 @@ function connectWs(url) {
       const m = JSON.parse(ev.data);
       if (m?.type === 'partial' && m?.text) {
         console.log(`[${TAG}][WS][PARTIAL]`, m.text.slice(0, 60));
+        // Forward partial for display
         chrome.runtime.sendMessage({ type: 'ASR_PARTIAL', text: m.text, t0: m.t0, t1: m.t1 }).catch(() => {});
+        // Forward PHI map updates (if present)
+        if (m.phiMap && currentEncounterId) {
+          chrome.runtime.sendMessage({ type: 'PHI_MAP_UPDATE', encounterId: currentEncounterId, phiMap: m.phiMap }).catch(() => {});
+        }
       }
     } catch {
       // ignore binary frames
@@ -258,7 +264,13 @@ chrome.runtime.onMessage.addListener((m) => {
   }
   if (m?.type === 'ASR_CONNECT' && m.wssUrl) {
     const ensure = state === 'idle' ? start() : Promise.resolve();
-    Promise.resolve(ensure).then(() => connectWs(m.wssUrl));
+    Promise.resolve(ensure).then(() => {
+      try {
+        const u = new URL(m.wssUrl);
+        currentEncounterId = u.searchParams.get('encounterId') || null;
+      } catch { currentEncounterId = null; }
+      connectWs(m.wssUrl);
+    });
   }
   if (m?.type === 'ASR_DISCONNECT') {
     try { ws && ws.readyState === WebSocket.OPEN && ws.close(); } catch {}

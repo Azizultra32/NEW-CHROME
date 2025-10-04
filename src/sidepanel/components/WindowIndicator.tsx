@@ -29,7 +29,7 @@ export function WindowIndicator({ pairingEnabled, pairingSummary, lastKnown }: P
           )}
         </div>
       </div>
-      <style jsx>{`
+      <style>{`
         .window-indicator {
           background: rgba(15, 23, 42, 0.04);
           padding: 8px 12px;

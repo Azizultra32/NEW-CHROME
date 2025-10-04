@@ -27,7 +27,7 @@ export function rehydrateTranscript(
   // Replace all tokens with original values
   for (const [token, value] of Object.entries(phiMap)) {
     const tokenPattern = `[${token}]`;
-    result = result.replaceAll(tokenPattern, value);
+    result = result.split(tokenPattern).join(value);
   }
 
   return result;

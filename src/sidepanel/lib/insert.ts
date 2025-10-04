@@ -488,3 +488,43 @@ export async function listMatchingSelectors(mapping: FieldMapping, options: Sele
   }).catch(() => null);
   return (res && res[0]?.result) || [];
 }
+
+// Verify the insertion by checking the target field's content length against the payload length.
+// Returns only lengths to avoid exposing PHI in logs.
+export async function verifyInsertion(
+  mapping: FieldMapping,
+  selector: string,
+  expectedText: string,
+  options: SelectorOptions = {}
+): Promise<{ ok: boolean; actualLength: number; expectedLength: number }> {
+  const tabId = await resolveTargetTabId(mapping);
+  if (!tabId) return { ok: false, actualLength: 0, expectedLength: expectedText.length };
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel: string, path?: number[]) => {
+      let w: Window & typeof globalThis = window;
+      try { if (Array.isArray(path) && path.length) { for (const i of path) { w = (w.frames[i] as any); if (!w) break; } } } catch { return { ok: false, len: 0 } as any; }
+      const doc = w?.document || document;
+      const el: any = (doc.querySelector(sel) as any) || null;
+      if (!el) return { ok: false, len: 0 } as any;
+      if ('value' in el) {
+        try { return { ok: true, len: String(el.value ?? '').length } as any; } catch { return { ok: false, len: 0 } as any; }
+      }
+      if (el.isContentEditable) {
+        try {
+          const text = typeof el.innerText === 'string' ? el.innerText : (el.textContent || '');
+          return { ok: true, len: String(text || '').length } as any;
+        } catch { return { ok: false, len: 0 } as any; }
+      }
+      return { ok: false, len: 0 } as any;
+    },
+    args: [selector, mapping.framePath]
+  }).catch(() => null);
+  const out = (res && res[0] && (res[0].result as { ok: boolean; len: number })) || { ok: false, len: 0 };
+  const expectedLength = String(expectedText || '').length;
+  const actualLength = Math.max(0, Number(out.len || 0));
+  // Consider success if we meet a 90% threshold to allow for formatting or normalization differences.
+  const threshold = Math.floor(expectedLength * 0.9);
+  const ok = out.ok && actualLength >= threshold;
+  return { ok, actualLength, expectedLength };
+}

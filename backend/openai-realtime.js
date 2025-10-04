@@ -279,7 +279,10 @@ Do not add interpretations or medical advice. Focus on accurate transcription.`,
   handleTranscription(message) {
     const { transcript, item_id } = message;
 
-    console.log('[OpenAI Realtime] Transcript:', transcript);
+        // Do not log raw transcripts (may contain PHI). In development, log length only.
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[OpenAI Realtime] Transcript received (len):', typeof transcript === 'string' ? transcript.length : 0);
+        }
 
     // Emit transcript event
     this.onTranscript({
@@ -296,7 +299,7 @@ Do not add interpretations or medical advice. Focus on accurate transcription.`,
   handleTranscriptDelta(message) {
     const { delta, item_id } = message;
 
-    // Emit partial transcript
+    // Emit partial transcript (avoid logging content here)
     this.onTranscript({
       type: 'partial',
       text: delta,
@@ -325,7 +328,9 @@ Do not add interpretations or medical advice. Focus on accurate transcription.`,
   handleFunctionCall(message) {
     const { name, arguments: args, call_id } = message;
 
-    console.log('[OpenAI Realtime] Function call:', name, args);
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[OpenAI Realtime] Function call:', name);
+    }
 
     // Emit function call event (server.js will handle routing)
     if (this.onFunctionCall) {

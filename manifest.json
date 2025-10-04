@@ -8,7 +8,11 @@
   "side_panel": { "default_path": "sidepanel.html" },
   "permissions": ["storage", "activeTab", "offscreen", "notifications"],
   "optional_permissions": ["scripting", "tabs"],
-  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",

@@ -2,6 +2,7 @@
 // Keeps the assistant window "magnetized" to the EMR window when enabled
 
 const STORAGE_KEY_ENABLED = 'WINDOW_PAIR_ENABLED';
+const STORAGE_KEY_AUTO = 'WINDOW_PAIR_AUTO';
 const STORAGE_ALLOWED_HOSTS = 'ALLOWED_HOSTS';
 const EMR_PATTERNS = ['epic.com', 'cerner.com', 'athenahealth.com', 'ehr-test.html'];
 
@@ -13,19 +14,25 @@ class WindowPairManager {
     this.metadata = new Map(); // emrWindowId -> { host, title, url }
     this.allowedHosts = [];
     this.initialized = false;
+    this.auto = false;
     this.init();
     this.setupListeners();
   }
 
   async init() {
     try {
-      const store = await chrome.storage.local.get([STORAGE_KEY_ENABLED, STORAGE_ALLOWED_HOSTS]);
+      const store = await chrome.storage.local.get([STORAGE_KEY_ENABLED, STORAGE_ALLOWED_HOSTS, STORAGE_KEY_AUTO]);
       this.enabled = !!store[STORAGE_KEY_ENABLED];
+      this.auto = !!store[STORAGE_KEY_AUTO];
       if (Array.isArray(store[STORAGE_ALLOWED_HOSTS])) {
         this.allowedHosts = store[STORAGE_ALLOWED_HOSTS];
       }
       // Always refresh to inject docks on all pages
       await this.refreshPairs();
+      // If auto-pair is on and we have allowed hosts, ensure enabled
+      if (this.auto && (!this.enabled) && Array.isArray(this.allowedHosts) && this.allowedHosts.length > 0) {
+        try { await this.setEnabled(true); } catch {}
+      }
       this.broadcastStatus();
     } catch (error) {
       console.warn('[WindowPair] init error', error);
@@ -81,12 +88,20 @@ class WindowPairManager {
         this.allowedHosts = Array.isArray(next) ? next : [];
         if (this.enabled) {
           this.refreshPairs().catch(() => {});
+        } else if (this.auto && this.allowedHosts.length > 0) {
+          this.setEnabled(true).catch(() => {});
         }
       }
       if (STORAGE_KEY_ENABLED in changes) {
         const nextEnabled = !!changes[STORAGE_KEY_ENABLED]?.newValue;
         if (nextEnabled !== this.enabled) {
           this.setEnabled(nextEnabled).catch(() => {});
+        }
+      }
+      if (STORAGE_KEY_AUTO in changes) {
+        this.auto = !!changes[STORAGE_KEY_AUTO]?.newValue;
+        if (this.auto && !this.enabled && this.allowedHosts.length > 0) {
+          this.setEnabled(true).catch(() => {});
         }
       }
     });

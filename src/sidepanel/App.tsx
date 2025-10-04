@@ -9,11 +9,15 @@ import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert, getFieldContent, listMatchingSelectors } from './lib/insert';
+import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert, getFieldContent, listMatchingSelectors, verifyInsertion } from './lib/insert';
+import { discoverCandidatesForSection } from './lib/fieldDiscovery';
 import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
 import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
 import { WindowIndicator } from './components/WindowIndicator';
+import { phiKeyManager, storePHIMap, loadPHIMap, PHIMap, deletePHIMap } from './lib/phi-rehydration';
+import { composeNote, ComposedNote, extractSectionText } from './lib/note-composer-client';
+import { captureAndSendScreenshot } from './lib/auditCapture';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
@@ -42,6 +46,8 @@ function AppInner() {
   const [host, setHost] = useState<string>('');
   const [profile, setProfile] = useState<Record<Section, FieldMapping>>({} as any);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [redactedOverlay, setRedactedOverlay] = useState(false);
+  const [auditScreenshots, setAuditScreenshots] = useState(false);
   const [apiBase, setApiBase] = useState('');
   const [allowedHosts, setAllowedHosts] = useState<string[]>([]);
   const [wsEvents, setWsEvents] = useState<string[]>([]);
@@ -57,6 +63,8 @@ function AppInner() {
   const [pairingState, setPairingState] = useState<{ enabled: boolean; pairs: Array<{ host?: string; title?: string; url?: string }> }>({ enabled: false, pairs: [] });
   const [pairingBusy, setPairingBusy] = useState(false);
   const [windowTrackState, setWindowTrackState] = useState<{ sidepanelWindowId: number | null; lastKnown: { title?: string; url?: string } | null }>({ sidepanelWindowId: null, lastKnown: null });
+  // Auto-pair on allowed hosts (persisted in chrome.storage.local as WINDOW_PAIR_AUTO)
+  const [autoPairOnAllowed, setAutoPairOnAllowed] = useState(false);
 
   const defaultTemplates: Record<Section, string> = {
     PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
@@ -245,6 +253,40 @@ function AppInner() {
           lastKnown: message.lastKnown || null
         });
       }
+      if (message?.type === 'PHI_MAP_UPDATE' && message.encounterId && message.phiMap) {
+        (async () => {
+          try {
+            const encId = message.encounterId as string;
+            // Keep our encounter id in sync if not set
+            if (!encounterIdRef.current) { encounterIdRef.current = encId; setEncounterId(encId); }
+            const key = await phiKeyManager.getOrCreateKey(encId);
+            await storePHIMap(encId, message.phiMap as PHIMap, key);
+          } catch (e) {
+            console.warn('[AssistMD] PHI_MAP_UPDATE store failed', e);
+          }
+        })();
+      }
+      if (message?.type === 'REQUEST_GHOST_PREVIEW') {
+        (async () => {
+          const sections = computeGhostSections();
+          setGhostPreview(sections);
+          try {
+            const tab = await getContentTab();
+            if (tab?.id) {
+              await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_PREVIEW', sections });
+            }
+          } catch {}
+        })();
+      }
+      if (message?.type === 'REQUEST_EXECUTE_INSERT') {
+        (async () => {
+          const sections = ghostPreview || computeGhostSections();
+          if (sections.PLAN) { await onInsert('PLAN'); }
+          if (sections.HPI)  { await onInsert('HPI'); }
+          if (sections.ROS)  { await onInsert('ROS'); }
+          if (sections.EXAM) { await onInsert('EXAM'); }
+        })();
+      }
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => {
@@ -329,8 +371,12 @@ function AppInner() {
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
   const [permBanner, setPermBanner] = useState(false);
-  const [targetChooser, setTargetChooser] = useState<null | { section: Section; selectors: string[]; payload: string; bypassGuard?: boolean }>(null);
-  const [targetSelection, setTargetSelection] = useState<string>('');
+  const [targetChooser, setTargetChooser] = useState<null | { section: Section; candidates: { selector: string; framePath?: number[] }[]; payload: string; bypassGuard?: boolean }>(null);
+  const [targetSelection, setTargetSelection] = useState<number>(0);
+  const [ghostPreview, setGhostPreview] = useState<Partial<Record<Section, string>> | null>(null);
+  const [encounterId, setEncounterId] = useState<string | null>(null);
+  const encounterIdRef = useRef<string | null>(null);
+  const [composedNote, setComposedNote] = useState<ComposedNote | null>(null);
 
   type InsertOpts = {
     bypassGuard?: boolean;
@@ -402,9 +448,9 @@ function AppInner() {
     const shouldPrompt = !opts.skipTargetPrompt && selectors.length > 1 && availableSelectors.length > 1 && !opts.preferredSelector;
     if (shouldPrompt) {
       const options = availableSelectors.length ? availableSelectors : selectors;
-      setTargetChooser({ section, selectors: options, payload: opts.payloadOverride ?? getTranscriptPayload(), bypassGuard: opts.bypassGuard ?? true });
-      const first = options[0];
-      setTargetSelection(first);
+      const cands = options.map((s) => ({ selector: s, confidence: 0.8 }));
+      setTargetChooser({ section, candidates: cands, payload: opts.payloadOverride ?? getTranscriptPayload(), bypassGuard: opts.bypassGuard ?? true });
+      setTargetSelection(0);
       telemetry.recordEvent('target_prompt_shown', { section, selectors: selectors.length }).catch(() => {});
       return;
     }
@@ -416,8 +462,19 @@ function AppInner() {
     if (!verify.ok) {
       const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
       notifyError(reason);
-      setRemapPrompt({ section });
       telemetry.recordEvent('verify_fail', { section, reason, selector: chosen }).catch(() => {});
+      // Try semantic discovery and offer suggestions inline
+      try {
+        const suggestions = await discoverCandidatesForSection(section);
+        if (suggestions && suggestions.length) {
+          setTargetChooser({ section, candidates: suggestions.map(s => ({ selector: s.selector, framePath: s.framePath, confidence: s.confidence })), payload: getTranscriptPayload(), bypassGuard: true });
+          setTargetSelection(0);
+          pushWsEvent('discovery: suggested targets (verify failed)');
+          return;
+        }
+      } catch {}
+      // Fallback to explicit remap prompt
+      setRemapPrompt({ section });
       return;
     }
 
@@ -441,6 +498,63 @@ function AppInner() {
     return text || '(empty)';
   }
 
+  function computeGhostSections(): Partial<Record<Section, string>> {
+    const plan = getTranscriptPayload();
+    const out: Partial<Record<Section, string>> = { PLAN: plan };
+    try {
+      if (features.multi) {
+        out.HPI = (defaultTemplates as any).HPI || '';
+        out.ROS = (defaultTemplates as any).ROS || '';
+        out.EXAM = (defaultTemplates as any).EXAM || '';
+      }
+    } catch {}
+    return out;
+  }
+
+  async function sendGhostPreview() {
+    try {
+      const sections = computeGhostSections();
+      setGhostPreview(sections);
+      const tab = await getContentTab();
+      if (tab?.id) {
+        await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_PREVIEW', sections });
+      }
+    } catch {
+      toast.push('Unable to show preview');
+    }
+  }
+
+  async function handleComposeNote() {
+    try {
+      const encId = encounterIdRef.current || `enc_${Date.now()}`;
+      const key = await phiKeyManager.getOrCreateKey(encId);
+      const phi = (await loadPHIMap(encId, key)) || {};
+      // Use tokenized transcript (as displayed; backend will rehydrate with phi)
+      const tokenized = getTranscriptPayload();
+      const note = await composeNote({
+        encounterId: encId,
+        transcript: tokenized,
+        phiMap: phi,
+        noteFormat: 'SOAP',
+        specialty: 'family_medicine',
+        apiBase
+      });
+      setComposedNote(note);
+      toast.push('Note composed');
+    } catch (e: any) {
+      console.warn('[AssistMD] compose failed', e);
+      toast.push(`Compose failed: ${e?.message || 'error'}`);
+    }
+  }
+
+  async function insertComposed(section: string) {
+    if (!composedNote) return;
+    const text = extractSectionText(composedNote, section) || '';
+    if (!text) { toast.push(`No ${section} section`); return; }
+    // Bypass guard remains false; normal guard applies
+    await onInsert(section as Section, { payloadOverride: text });
+  }
+
   async function finalizeInsert(section: Section, field: FieldMapping, payload: string, target: { selector: string; strict: boolean }) {
     const t0 = Date.now();
     const result = await insertUsingMapping(field, payload, { preferredSelector: target.selector, strict: target.strict });
@@ -449,7 +563,34 @@ function AppInner() {
       telemetry.recordEvent('insert_failed', { section, selector: target.selector }).catch(() => {});
       return;
     }
-    toast.push(`Insert ${section} via ${result.strategy}`);
+    // Verify insertion (no PHI logged: only lengths)
+    try {
+      const verify = await verifyInsertion(field, result.selector, payload);
+      if (!verify.ok) {
+        notifyError('Insert verification failed');
+        telemetry.recordEvent('insert_verify_fail', { section, selector: result.selector, expectedLength: verify.expectedLength, actualLength: verify.actualLength }).catch(() => {});
+        if (auditScreenshots && encounterIdRef.current) {
+          try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'verify_fail'); } catch {}
+        }
+        // Attempt semantic discovery to suggest better targets
+        try {
+          const cands = await discoverCandidatesForSection(section);
+          if (cands && cands.length) {
+            setTargetChooser({ section, candidates: cands.map(c => ({ selector: c.selector, framePath: c.framePath })), payload, bypassGuard: true });
+            setTargetSelection(0);
+            pushWsEvent('discovery: suggested alternative targets');
+          }
+        } catch {}
+      } else {
+        toast.push(`Insert ${section} via ${result.strategy}`);
+        if (auditScreenshots && encounterIdRef.current) {
+          try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'post_insert'); } catch {}
+        }
+      }
+    } catch {
+      // Non-fatal; still report success path to user without leaking PHI
+      toast.push(`Insert ${section} via ${result.strategy}`);
+    }
     pushWsEvent(`audit: ${section.toLowerCase()} inserted (${result.selector})`);
     audit('insert_ok', { strategy: result.strategy, section, selector: result.selector });
     setLastError(null);
@@ -471,7 +612,10 @@ function AppInner() {
       .join(' ')
       .trim();
     if (!text) return;
-    console.log('[AssistMD][SR] heard:', text);
+    // Avoid logging raw dictation to console (may contain PHI). Use length-only in development.
+    if (isDevelopmentBuild) {
+      try { console.log('[AssistMD][SR] heard (len):', text.length); } catch {}
+    }
     // Reflect in live word strip too
     setLiveWords(text);
 
@@ -1004,8 +1148,16 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        const { ALLOWED_HOSTS } = await chrome.storage.local.get(['ALLOWED_HOSTS']);
+        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED']);
         if (Array.isArray(ALLOWED_HOSTS)) setAllowedHosts(ALLOWED_HOSTS as string[]);
+        setAutoPairOnAllowed(!!WINDOW_PAIR_AUTO);
+        const val = !!OVERLAY_REDACTED;
+        setRedactedOverlay(val);
+        try {
+          const tab = await getContentTab();
+          if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: val });
+        } catch {}
+        setAuditScreenshots(!!AUDIT_SCREENSHOT_ENABLED);
       } catch {}
     })();
   }, []);
@@ -1268,6 +1420,8 @@ ${section.join(' ')}`;
 
         try {
           const encId = crypto.randomUUID();
+          encounterIdRef.current = encId;
+          setEncounterId(encId);
           const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
           if (presign?.ok && presign.wssUrl) {
             await chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: presign.wssUrl });
@@ -1302,7 +1456,7 @@ ${section.join(' ')}`;
 
   // Listen for status + data from background/offscreen
   useEffect(() => {
-    const handler = (m: any) => {
+    const handler = async (m: any) => {
       if (m?.type === 'OFFSCREEN_STATUS') {
         pushWsEvent(`status: ${m.status}${m.code ? ` (${m.code})` : ''}`);
         if (m.status === 'running') {
@@ -1322,6 +1476,16 @@ ${section.join(' ')}`;
           setWsState('disconnected');
           setMode('idle');
           transcript.clear();
+          // Purge encounter keys and PHI map on stop
+          try {
+            const encId = encounterIdRef.current;
+            if (encId) {
+              try { await deletePHIMap(encId); } catch {}
+              try { phiKeyManager.deleteKey(encId); } catch {}
+              encounterIdRef.current = null;
+              setEncounterId(null);
+            }
+          } catch {}
         }
         if (m.status === 'error') {
           setRecording(false);
@@ -1532,17 +1696,41 @@ ${section.join(' ')}`;
             <div className="text-sm font-medium">Select target → {targetChooser.section}</div>
             <div className="text-[12px] text-slate-600">Choose which mapped selector should receive this insert.</div>
             <div className="max-h-40 overflow-auto space-y-2">
-              {targetChooser.selectors.map((sel) => (
-                <label key={sel} className="flex items-center gap-2 text-[12px] text-slate-700">
-                  <input
-                    type="radio"
-                    name="assist-target-choice"
-                    value={sel}
-                    checked={targetSelection === sel}
-                    onChange={() => setTargetSelection(sel)}
-                  />
-                  <span className="font-mono break-all">{sel}</span>
-                </label>
+              {targetChooser.candidates.map((cand, idx) => (
+                <div key={`${cand.selector}-${(cand.framePath||[]).join('.')}`}
+                     className="flex items-center justify-between gap-2 text-[12px] text-slate-700">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="assist-target-choice"
+                      value={idx}
+                      checked={targetSelection === idx}
+                      onChange={() => setTargetSelection(idx)}
+                    />
+                    <span className="font-mono break-all">{cand.selector}{cand.framePath && cand.framePath.length ? `  (iframe ${cand.framePath.join('>')})` : ''}</span>
+                  </label>
+                  <button
+                    className="px-1.5 py-0.5 rounded border border-slate-300"
+                    onClick={async () => {
+                      try {
+                        const temp: FieldMapping = {
+                          section: targetChooser.section,
+                          selector: cand.selector,
+                          strategy: 'value',
+                          verified: false,
+                          framePath: cand.framePath,
+                          target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+                        } as any;
+                        const res = await verifyTarget(temp as any, { preferredSelector: cand.selector, strict: true });
+                        toast.push(res.ok ? 'Target OK' : (res.reason === 'missing' ? 'Missing' : 'Not editable'));
+                      } catch {
+                        toast.push('Test failed');
+                      }
+                    }}
+                  >
+                    Test
+                  </button>
+                </div>
               ))}
             </div>
             <div className="flex gap-2 justify-end">
@@ -1550,7 +1738,7 @@ ${section.join(' ')}`;
                 className="px-2 py-1 text-xs rounded-md border border-slate-300"
                 onClick={() => {
                   setTargetChooser(null);
-                  setTargetSelection('');
+                  setTargetSelection(0);
                   toast.push('Insert cancelled');
                 }}
               >
@@ -1559,16 +1747,18 @@ ${section.join(' ')}`;
               <button
                 className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                 onClick={async () => {
-                  const choice = targetSelection || targetChooser.selectors[0];
+                  const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
                   setTargetChooser(null);
-                  setTargetSelection('');
-                  await onInsert(targetChooser.section, {
-                    bypassGuard: targetChooser.bypassGuard,
-                    preferredSelector: choice,
-                    payloadOverride: targetChooser.payload,
-                    skipTargetPrompt: true,
-                    strictSelector: true
-                  });
+                  setTargetSelection(0);
+                  const temp: FieldMapping = {
+                    section: targetChooser.section,
+                    selector: cand.selector,
+                    strategy: 'value',
+                    verified: false,
+                    framePath: cand.framePath,
+                    target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+                  } as any;
+                  await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
                 }}
               >
                 Continue
@@ -1747,11 +1937,63 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
+                <div className="text-sm font-medium mt-3">Overlay</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Redact ghost preview text</span>
+                  <input
+                    type="checkbox"
+                    checked={redactedOverlay}
+                    onChange={async (e) => {
+                      const on = !!e.target.checked;
+                      setRedactedOverlay(on);
+                      try { await chrome.storage.local.set({ OVERLAY_REDACTED: on }); } catch {}
+                      try {
+                        const tab = await getContentTab();
+                        if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on });
+                      } catch {}
+                    }}
+                  />
+                </label>
+                <div className="text-sm font-medium mt-3">PHI Session</div>
+                <button
+                  className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                  onClick={async () => {
+                    try {
+                      const encId = encounterIdRef.current;
+                      if (encId) {
+                        await deletePHIMap(encId);
+                        try { phiKeyManager.deleteKey(encId); } catch {}
+                        encounterIdRef.current = null;
+                        setEncounterId(null);
+                        toast.push('PHI session cleared');
+                      } else {
+                        toast.push('No active encounter');
+                      }
+                    } catch {
+                      toast.push('Failed to clear PHI session');
+                    }
+                  }}
+                >
+                  Purge keys & PHI maps
+                </button>
                 <div className="text-sm font-medium mt-3">Window Management</div>
                 <div className="text-[12px] text-slate-600">Keep AssistMD magnetized next to allowed EHR windows.</div>
                 <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                   <span>Auto-open floating assistant window</span>
                   <input type="checkbox" checked={pairingEnabled} onChange={(e) => onTogglePairing(e.target.checked)} />
+                </label>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Auto-pair on allowed hosts</span>
+                  <input
+                    type="checkbox"
+                    checked={autoPairOnAllowed}
+                    onChange={async (e) => {
+                      const val = !!e.target.checked;
+                      try { await chrome.storage.local.set({ WINDOW_PAIR_AUTO: val }); } catch {}
+                      setAutoPairOnAllowed(val);
+                      toast.push(val ? 'Auto-pair enabled' : 'Auto-pair disabled');
+                    }}
+                  />
                 </label>
                 <div className="text-[11px] text-slate-500">{pairingEnabled ? pairingSummary : 'Disabled — enable to magnetize on allowed hosts.'}</div>
                 <div className="text-sm font-medium mt-3">Fallback Selectors</div>
@@ -2013,7 +2255,46 @@ ${section.join(' ')}`;
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
               onMapFields={onMapFields}
+              onGhostPreview={sendGhostPreview}
+              onClearPreview={async () => {
+                setGhostPreview(null);
+                try {
+                  const tab = await getContentTab();
+                  if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_CLEAR' });
+                } catch {}
+              }}
+              onComposeNote={handleComposeNote}
+              hasTranscript={transcript.get().length > 0}
             />
+            {composedNote && (
+              <div className="mt-3 rounded-lg border border-slate-200 bg-white/90 p-3 space-y-2">
+                <div className="text-sm font-medium">Composed Note</div>
+                {Object.entries(composedNote.sections).map(([sec, txt]) => (
+                  <div key={sec} className="border border-slate-100 rounded-md p-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-semibold">{sec}</div>
+                      <button
+                        className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                        onClick={() => insertComposed(sec)}
+                      >
+                        Insert {sec}
+                      </button>
+                    </div>
+                    <div className="mt-1 text-[12px] whitespace-pre-wrap text-slate-700">
+                      {String(txt || '').slice(0, 800)}
+                    </div>
+                  </div>
+                ))}
+                {composedNote.flags?.length > 0 && (
+                  <div className="text-[12px] text-slate-700">
+                    <div className="font-medium">Safety flags</div>
+                    {composedNote.flags.map((f, i) => (
+                      <div key={i}>• [{f.severity}] {f.text}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {pendingGuard && !pendingGuard.ok && pendingGuard.fp && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm space-y-2">
                 <div className="font-medium">Confirm patient before inserting</div>

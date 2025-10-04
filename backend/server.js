@@ -14,6 +14,8 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'node:http';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 
 import { OpenAIRealtimeClient, createVoiceCommandFunctions } from './openai-realtime.js';
 import { pseudonymize, rehydrate, serializePHIMap, getRedactionStats } from './phi-redactor.js';
@@ -37,6 +39,12 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// Enforce PHI redaction in production
+if (process.env.NODE_ENV === 'production' && process.env.ENABLE_LOCAL_PHI_REDACTION !== 'true') {
+  console.error('❌ ENABLE_LOCAL_PHI_REDACTION must be true in production to prevent PHI leakage');
+  process.exit(1);
+}
+
 // Express app
 const app = express();
 app.use(cors());
@@ -44,15 +52,42 @@ app.use(express.json());
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    features: {
-      phi_redaction: process.env.ENABLE_LOCAL_PHI_REDACTION === 'true',
-      safety_rails: process.env.ENABLE_SAFETY_RAILS === 'true',
-      note_composition: process.env.ENABLE_NOTE_COMPOSITION === 'true'
-    }
-  });
+  (async () => {
+    let audit = { dirSizeBytes: 0, lastCleanupTs: null };
+    try {
+      const root = path.join(process.cwd(), 'audit_screenshots');
+      async function sizeOf(dir) {
+        let total = 0;
+        let entries;
+        try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return 0; }
+        for (const e of entries) {
+          const p = path.join(dir, e.name);
+          try {
+            if (e.isDirectory()) total += await sizeOf(p);
+            else total += (await fsp.stat(p)).size;
+          } catch {}
+        }
+        return total;
+      }
+      audit.dirSizeBytes = await sizeOf(root);
+      try {
+        const marker = await fsp.readFile(path.join(root, '.last_cleanup'), 'utf8');
+        const json = JSON.parse(marker || '{}');
+        audit.lastCleanupTs = json.ts || null;
+      } catch {}
+    } catch {}
+
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      features: {
+        phi_redaction: process.env.ENABLE_LOCAL_PHI_REDACTION === 'true',
+        safety_rails: process.env.ENABLE_SAFETY_RAILS === 'true',
+        note_composition: process.env.ENABLE_NOTE_COMPOSITION === 'true'
+      },
+      audit
+    });
+  })();
 });
 
 // Presign endpoint - returns WebSocket URL for encounter
@@ -135,6 +170,27 @@ app.get('/v1/audit/logs', async (req, res) => {
   }
 });
 
+// Screenshot audit intake (expects encrypted payload from extension)
+app.post('/v1/audit/screenshot', express.json({ limit: '10mb' }), async (req, res) => {
+  try {
+    const { encounterId, iv, data, label, ts } = req.body || {};
+    if (!encounterId || !iv || !data) {
+      return res.status(400).json({ error: 'invalid_payload' });
+    }
+    // Store encrypted blob; lifecycle cleanup should be handled by ops (e.g., daily job)
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const dir = path.join(process.cwd(), 'audit_screenshots', String(encounterId));
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${ts || Date.now()}_${label || 'shot'}.json`);
+    await fs.writeFile(file, JSON.stringify({ encounterId, iv, data, label: label || 'shot', ts: ts || Date.now() }), 'utf8');
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[Audit] screenshot intake failed', err);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 // Legacy audit endpoint (for backward compatibility)
 app.post('/v1/audit', (req, res) => {
   const { type, encounterId, fp, extra } = req.body || {};
@@ -184,8 +240,6 @@ wss.on('connection', async (ws, req) => {
       onTranscript: async (event) => {
         const { type, text, timestamp } = event;
 
-        console.log(`[OpenAI] Transcript (${type}):`, text.slice(0, 60));
-
         // Pseudonymize transcript if enabled
         let finalText = text;
         let phiUpdated = false;
@@ -200,6 +254,12 @@ wss.on('connection', async (ws, req) => {
             const stats = getRedactionStats(context.phiMap);
             await logPHIRedaction(encounterId, stats);
           }
+        }
+
+        // In development, log only pseudonymized/trimmed preview (never raw)
+        if (process.env.NODE_ENV === 'development') {
+          const preview = (process.env.ENABLE_LOCAL_PHI_REDACTION === 'true') ? String(finalText || '').slice(0, 60) : '[redacted]';
+          console.log(`[OpenAI] Transcript (${type}):`, preview);
         }
 
         // Store in buffer

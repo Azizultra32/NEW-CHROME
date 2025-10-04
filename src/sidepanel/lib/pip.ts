@@ -30,22 +30,23 @@ export class PiPAssistant {
     
     try {
       // Request PiP - this creates always-on-top window!
-      this.pipWindow = await this.video!.requestPictureInPicture();
-      
+      const pipWindow = await this.video!.requestPictureInPicture();
+      this.pipWindow = pipWindow as any;
+
       // Set PiP window size
-      if ('width' in this.pipWindow) {
-        (this.pipWindow as any).width = 350;
-        (this.pipWindow as any).height = 500;
+      if ('width' in pipWindow) {
+        (pipWindow as any).width = 350;
+        (pipWindow as any).height = 500;
       }
-      
+
       // Start rendering our UI to the PiP window
       this.startRendering();
-      
+
       // Handle PiP window close
-      this.pipWindow.addEventListener('resize', () => {
+      pipWindow.addEventListener('resize', () => {
         console.log('PiP resized');
       });
-      
+
       return true;
     } catch (error) {
       console.error('PiP failed:', error);
@@ -54,12 +55,14 @@ export class PiPAssistant {
   }
   
   private startRendering() {
-    const ctx = this.canvas!.getContext('2d')!;
+    const ctx = this.canvas?.getContext('2d');
+    if (!ctx) return;
     
     const render = () => {
       // Clear canvas
+      if (!this.canvas) return;
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, this.canvas!.width, this.canvas!.height);
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       
       // Draw UI elements
       ctx.fillStyle = '#000000';
@@ -89,8 +92,8 @@ export class PiPAssistant {
   
   private getLatestTranscript(): string {
     // Get last few transcript lines from your store
-    const items = window.transcript?.get() || [];
-    return items.slice(-5).map(item => item.text).join(' ');
+    const items = (window as any).transcript?.get() || [];
+    return items.slice(-5).map((item: any) => item.text).join(' ');
   }
   
   private wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
