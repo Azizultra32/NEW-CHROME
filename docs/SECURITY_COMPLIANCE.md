@@ -58,6 +58,22 @@ This document summarizes mandatory controls and safe patterns for handling PHI u
 - [ ] PHI map encrypted at rest; browser re‑hydrate only
 - [ ] Screen‑sharing redaction plan for overlays
 
+## Ops — Retention & Integrity Cron
+
+Add daily jobs on the backend host to enforce retention and check audit integrity.
+
+Example crontab:
+
+```
+# Cleanup encrypted audit screenshots older than 30 days
+0 2 * * * npm --prefix /path/to/CascadeProjects/windsurf-project/backend run cleanup:audit
+
+# Verify audit log integrity (alerts on nonzero exit)
+30 2 * * * npm --prefix /path/to/CascadeProjects/windsurf-project/backend run verify:audit || echo 'ALERT: audit integrity failed' | logger
+```
+
+Environment:
+- `AUDIT_RETENTION_DAYS` (optional) to override 30-day default for cleanup.
+
 ## Notes
 - Pseudonymization is reversible; treat tokenized text as PHI unless assured recipient cannot re‑identify and content is de‑identified per HIPAA.
-

@@ -4,6 +4,14 @@
     return;
   }
 
+  // Silence console in production contexts to reduce PHI risk
+  try {
+    if (!(window).__ASSIST_DEBUG) {
+      console.log = () => {};
+      console.warn = () => {};
+    }
+  } catch {}
+
   function extAlive() {
     try { return !!chrome?.runtime?.id; } catch { return false; }
   }
@@ -468,6 +476,7 @@
     });
     btn = doc.createElement('button');
     btn.setAttribute('data-assist-toggle', '1');
+    btn.setAttribute('aria-label', 'Toggle pairing');
     btn.type = 'button';
     btn.textContent = 'Pairing Off';
     Object.assign(btn.style, {

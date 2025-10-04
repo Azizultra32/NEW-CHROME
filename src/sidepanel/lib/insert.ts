@@ -5,7 +5,7 @@ type SelectorOptions = {
   strict?: boolean;
 };
 
-type InsertOptions = SelectorOptions;
+type InsertOptions = SelectorOptions & { mode?: 'append' | 'replace' };
 
 export type InsertResult =
   | { ok: true; strategy: Strategy | 'clipboard'; selector: string }
@@ -230,7 +230,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string, op
 
   const execResult = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (selectors: string[], value: string, path?: number[]) => {
+    func: (selectors: string[], value: string, path?: number[], mode?: 'append' | 'replace') => {
       let w: Window & typeof globalThis = window;
       try {
         if (Array.isArray(path) && path.length) {
@@ -250,6 +250,18 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string, op
         try {
           el.focus();
           const selection = (w.getSelection && w.getSelection()) || (doc as any).getSelection?.();
+          // Snapshot
+          try {
+            (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+              kind: 'ce', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
+              htmlBefore: el.innerHTML
+            };
+          } catch {}
+          if (mode === 'replace') {
+            // Replace entire content
+            el.innerText = value;
+            return { status: 'execCommand' as const, selector: chosen };
+          }
           if (selection && selection.rangeCount > 0) {
             let range = selection.getRangeAt(0);
             const within = el.contains(range.startContainer);
@@ -258,12 +270,6 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string, op
               range.selectNodeContents(el);
               range.collapse(false);
             }
-            try {
-              (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
-                kind: 'ce', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
-                htmlBefore: el.innerHTML
-              };
-            } catch {}
             const node = doc.createTextNode(value);
             range.deleteContents();
             range.insertNode(node);
@@ -292,6 +298,18 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string, op
         } catch {}
         el.focus();
         try {
+          if (mode === 'replace') {
+            const prev = String(el.value ?? '');
+            try {
+              (w as any).__ASSIST_LAST_INSERT_SNAPSHOT = {
+                kind: 'value', selector: chosen, framePath: Array.isArray(path) ? path.slice(0) : [],
+                valueBefore: prev, selectionStart: 0, selectionEnd: prev.length
+              };
+            } catch {}
+            el.value = value;
+            el.dispatchEvent(new (w as any).Event('input', { bubbles: true }));
+            return { status: 'value' as const, selector: chosen };
+          }
           const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value?.length || 0);
           const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : (el.value?.length || 0);
           const src = String(el.value ?? '');
@@ -319,7 +337,7 @@ export async function insertUsingMapping(mapping: FieldMapping, text: string, op
       }
       return { status: 'fail' as const };
     },
-    args: [selectors, text, mapping.framePath]
+    args: [selectors, text, mapping.framePath, options.mode]
   }).catch(() => null);
 
   const directResult = execResult?.[0]?.result as { status: Strategy | 'fail'; selector?: string } | undefined;

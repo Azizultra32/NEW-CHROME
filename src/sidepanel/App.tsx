@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { CommandStrip } from './components/CommandStrip';
 import { TranscriptList } from './components/TranscriptList';
@@ -17,13 +18,15 @@ import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRe
 import { WindowIndicator } from './components/WindowIndicator';
 import { phiKeyManager, storePHIMap, loadPHIMap, PHIMap, deletePHIMap } from './lib/phi-rehydration';
 import { composeNote, ComposedNote, extractSectionText } from './lib/note-composer-client';
-import { captureAndSendScreenshot } from './lib/auditCapture';
+import { captureAndSendScreenshot, flushAuditQueue } from './lib/auditCapture';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
   return (
     <ToastProvider>
-      <AppInner />
+      <ErrorBoundary>
+        <AppInner />
+      </ErrorBoundary>
     </ToastProvider>
   );
 }
@@ -48,6 +51,19 @@ function AppInner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [redactedOverlay, setRedactedOverlay] = useState(false);
   const [auditScreenshots, setAuditScreenshots] = useState(false);
+  const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
+  const [metrics, setMetrics] = useState<{ verifyFail: number; inserts: number; p50: number; p95: number }>({ verifyFail: 0, inserts: 0, p50: 0, p95: 0 });
+
+  const refreshMetrics = useCallback(async () => {
+    try {
+      const items: any[] = await (telemetry as any).getRecent?.(200);
+      const fails = items.filter(i => i?.name === 'insert_verify_fail').length;
+      const inserts = items.filter(i => i?.name === 'insert_selector').length;
+      const latencies = items.filter(i => i?.name === 'insert_latency' && typeof i?.data?.ms === 'number').map(i => Number(i.data.ms)).sort((a,b) => a-b);
+      const pct = (arr: number[], q: number) => arr.length ? arr[Math.min(arr.length-1, Math.max(0, Math.floor(q * (arr.length-1))))] : 0;
+      setMetrics({ verifyFail: fails, inserts, p50: pct(latencies, 0.5), p95: pct(latencies, 0.95) });
+    } catch {}
+  }, []);
   const [apiBase, setApiBase] = useState('');
   const [allowedHosts, setAllowedHosts] = useState<string[]>([]);
   const [wsEvents, setWsEvents] = useState<string[]>([]);
@@ -364,6 +380,7 @@ function AppInner() {
   }
 
   const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string; selector: string; bypassGuard?: boolean }>(null);
+  const lastCandidateRef = useRef<null | { section: Section; selector: string; framePath?: number[] }>(null);
   const [pendingInsertDraft, setPendingInsertDraft] = useState('');
   const [pendingInsertExisting, setPendingInsertExisting] = useState<string | null>(null);
   const [pendingInsertLoading, setPendingInsertLoading] = useState(false);
@@ -371,7 +388,7 @@ function AppInner() {
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
   const [permBanner, setPermBanner] = useState(false);
-  const [targetChooser, setTargetChooser] = useState<null | { section: Section; candidates: { selector: string; framePath?: number[] }[]; payload: string; bypassGuard?: boolean }>(null);
+  const [targetChooser, setTargetChooser] = useState<null | { section: Section; candidates: { selector: string; framePath?: number[]; confidence?: number }[]; payload: string; bypassGuard?: boolean }>(null);
   const [targetSelection, setTargetSelection] = useState<number>(0);
   const [ghostPreview, setGhostPreview] = useState<Partial<Record<Section, string>> | null>(null);
   const [encounterId, setEncounterId] = useState<string | null>(null);
@@ -556,12 +573,16 @@ function AppInner() {
   }
 
   async function finalizeInsert(section: Section, field: FieldMapping, payload: string, target: { selector: string; strict: boolean }) {
-    const t0 = Date.now();
-    const result = await insertUsingMapping(field, payload, { preferredSelector: target.selector, strict: target.strict });
+    // Basic rate limit to avoid duplicate pastes
+    const now = Date.now();
+    if ((busyRef.current)) { notifyError('Insert in progress'); return; }
+    const t0 = now;
+    setBusy(true);
+    const result = await insertUsingMapping(field, payload, { preferredSelector: target.selector, strict: target.strict, mode: insertModes[section] || 'append' });
     if (!result.ok) {
       notifyError('Insert failed');
       telemetry.recordEvent('insert_failed', { section, selector: target.selector }).catch(() => {});
-      return;
+      setBusy(false); return;
     }
     // Verify insertion (no PHI logged: only lengths)
     try {
@@ -583,6 +604,30 @@ function AppInner() {
         } catch {}
       } else {
         toast.push(`Insert ${section} via ${result.strategy}`);
+        // Offer to save as mapping if this came from a candidate
+        try {
+          const lc = lastCandidateRef.current;
+          if (lc && lc.section === section && lc.selector === target.selector) {
+            const ok = confirm('Save this target as the mapping for this section?');
+            if (ok && host) {
+              const prof = await loadProfile(host);
+              const prev = prof[section];
+              const fallback = Array.from(new Set([...(prev?.fallbackSelectors || []), prev?.selector].filter(Boolean)));
+              prof[section] = {
+                section,
+                selector: lc.selector,
+                strategy: 'value',
+                verified: true,
+                framePath: lc.framePath,
+                target: (lc.framePath && lc.framePath.length) ? 'iframe' : 'page',
+                fallbackSelectors: fallback
+              } as any;
+              await saveProfile(host, prof as any);
+              toast.push('Mapping saved');
+            }
+            lastCandidateRef.current = null;
+          }
+        } catch {}
         if (auditScreenshots && encounterIdRef.current) {
           try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'post_insert'); } catch {}
         }
@@ -598,6 +643,7 @@ function AppInner() {
     const latency = Date.now() - t0;
     telemetry.recordLatency('insert_latency', latency, { section, strategy: result.strategy, selector: result.selector }).catch(() => {});
     telemetry.recordEvent('insert_selector', { section, selector: result.selector, strategy: result.strategy, latency }).catch(() => {});
+    setBusy(false);
   }
 
   const COMMAND_COOLDOWN_MS = 1000;
@@ -976,6 +1022,35 @@ function AppInner() {
   };
 
   useEffect(() => { ensureContentScript?.(); }, [getContentTab, allowedHosts]);
+  useEffect(() => { refreshMetrics().catch(() => {}); }, [recording, wsState]);
+  // Keyboard navigation for Target Chooser
+  useEffect(() => {
+    if (!targetChooser) return;
+    const onKey = async (e: KeyboardEvent) => {
+      try {
+        if (e.key === 'ArrowDown') { e.preventDefault(); setTargetSelection((i) => Math.min(i + 1, (targetChooser?.candidates.length || 1) - 1)); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); setTargetSelection((i) => Math.max(i - 1, 0)); }
+        else if (e.key === 'Enter') {
+          e.preventDefault();
+          const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
+          setTargetChooser(null);
+          setTargetSelection(0);
+          const temp: FieldMapping = {
+            section: targetChooser.section,
+            selector: cand.selector,
+            strategy: 'value',
+            verified: false,
+            framePath: cand.framePath,
+            target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+          } as any;
+          lastCandidateRef.current = { section: targetChooser.section, selector: cand.selector, framePath: cand.framePath };
+          await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
+        }
+      } catch {}
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [targetChooser, targetSelection]);
 
   // Capture active tab host & load mapping profile
   useEffect(() => {
@@ -1148,7 +1223,7 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED']);
+        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED, INSERT_MODES } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED','INSERT_MODES']);
         if (Array.isArray(ALLOWED_HOSTS)) setAllowedHosts(ALLOWED_HOSTS as string[]);
         setAutoPairOnAllowed(!!WINDOW_PAIR_AUTO);
         const val = !!OVERLAY_REDACTED;
@@ -1158,6 +1233,11 @@ function AppInner() {
           if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: val });
         } catch {}
         setAuditScreenshots(!!AUDIT_SCREENSHOT_ENABLED);
+        if (INSERT_MODES && typeof INSERT_MODES === 'object') {
+          setInsertModes((prev) => ({ ...prev, ...(INSERT_MODES as any) }));
+        }
+        try { await refreshMetrics(); } catch {}
+        try { await flushAuditQueue(); } catch {}
       } catch {}
     })();
   }, []);
@@ -1707,7 +1787,11 @@ ${section.join(' ')}`;
                       checked={targetSelection === idx}
                       onChange={() => setTargetSelection(idx)}
                     />
-                    <span className="font-mono break-all">{cand.selector}{cand.framePath && cand.framePath.length ? `  (iframe ${cand.framePath.join('>')})` : ''}</span>
+                    <span className="font-mono break-all">
+                      {cand.selector}
+                      {cand.framePath && cand.framePath.length ? `  (iframe ${cand.framePath.join('>')})` : ''}
+                      {typeof (cand as any).confidence === 'number' ? `  (${Math.round((cand as any).confidence * 100)}%)` : ''}
+                    </span>
                   </label>
                   <button
                     className="px-1.5 py-0.5 rounded border border-slate-300"
@@ -1747,19 +1831,20 @@ ${section.join(' ')}`;
               <button
                 className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                 onClick={async () => {
-                  const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
-                  setTargetChooser(null);
-                  setTargetSelection(0);
-                  const temp: FieldMapping = {
-                    section: targetChooser.section,
-                    selector: cand.selector,
-                    strategy: 'value',
-                    verified: false,
-                    framePath: cand.framePath,
-                    target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
-                  } as any;
-                  await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
-                }}
+              const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
+                setTargetChooser(null);
+                setTargetSelection(0);
+                const temp: FieldMapping = {
+                  section: targetChooser.section,
+                  selector: cand.selector,
+                  strategy: 'value',
+                  verified: false,
+                  framePath: cand.framePath,
+                  target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+                } as any;
+                lastCandidateRef.current = { section: targetChooser.section, selector: cand.selector, framePath: cand.framePath };
+                await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
+              }}
               >
                 Continue
               </button>
@@ -1825,22 +1910,52 @@ ${section.join(' ')}`;
       <div className="min-h-screen" style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <main className="shadow-2xl border border-slate-200" style={panelStyle}>
           <div className="p-4 space-y-4">
-            <Header
-              recording={recording}
-              focusMode={focusMode}
-              opacity={opacity}
-              mode={mode}
-              wsState={wsState}
-              host={host}
-              hostAllowed={!!host && allowedHosts.includes(host)}
-              pairingEnabled={pairingState.enabled}
-              pairingSummary={pairingSummary}
-              pairingBusy={pairingBusy}
-              onTogglePairing={onTogglePairing}
-              onToggleFocus={() => setFocusMode((v) => !v)}
-              onOpacity={setOpacity}
-              onOpenSettings={() => setSettingsOpen((v) => !v)}
-            />
+          <Header
+            recording={recording}
+            focusMode={focusMode}
+            opacity={opacity}
+            mode={mode}
+            wsState={wsState}
+            host={host}
+            hostAllowed={!!host && allowedHosts.includes(host)}
+            pairingEnabled={pairingState.enabled}
+            pairingSummary={pairingSummary}
+            pairingBusy={pairingBusy}
+            onTogglePairing={onTogglePairing}
+            onToggleFocus={() => setFocusMode((v) => !v)}
+            onOpacity={setOpacity}
+            onOpenSettings={() => setSettingsOpen((v) => !v)}
+          />
+          <div className="flex items-center justify-between text-[12px] text-slate-600">
+            <div>
+              Inserts: <span className="font-semibold">{metrics.inserts}</span> · Verify fails: <span className="font-semibold text-amber-700">{metrics.verifyFail}</span> · p50: <span className="font-semibold">{metrics.p50} ms</span> · p95: <span className="font-semibold">{metrics.p95} ms</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => { try { await refreshMetrics(); } catch {} }}
+              >Refresh</button>
+              <button
+                title="Privacy Shield"
+                className={`px-2 py-0.5 text-xs rounded-md border ${redactedOverlay && !auditScreenshots ? 'border-emerald-500 text-emerald-700' : 'border-slate-300'}`}
+                onClick={async () => {
+                  if (redactedOverlay && !auditScreenshots) {
+                    // turn off shield
+                    setRedactedOverlay(false);
+                    try { await chrome.storage.local.set({ OVERLAY_REDACTED: false }); } catch {}
+                    try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: false }); } catch {}
+                  } else {
+                    // enable redaction and disable audit screenshots
+                    setRedactedOverlay(true);
+                    try { await chrome.storage.local.set({ OVERLAY_REDACTED: true }); } catch {}
+                    try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: true }); } catch {}
+                    setAuditScreenshots(false);
+                    try { await chrome.storage.local.set({ AUDIT_SCREENSHOT_ENABLED: false }); } catch {}
+                  }
+                }}
+              >Shield</button>
+            </div>
+          </div>
             <WindowIndicator
               pairingEnabled={pairingEnabled}
               pairingSummary={pairingSummary}
@@ -1982,6 +2097,26 @@ ${section.join(' ')}`;
                   <span>Auto-open floating assistant window</span>
                   <input type="checkbox" checked={pairingEnabled} onChange={(e) => onTogglePairing(e.target.checked)} />
                 </label>
+                <div className="text-sm font-medium mt-3">Insert Mode</div>
+                <div className="text-[12px] text-slate-600">Choose Append (default) or Replace per section.</div>
+                {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
+                  <label key={`mode-${sec}`} className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                    <span>{sec}</span>
+                    <select
+                      className="rounded border border-slate-300 px-2 py-1 text-xs"
+                      value={insertModes[sec]}
+                      onChange={async (e) => {
+                        const val = (e.target.value === 'replace' ? 'replace' : 'append') as 'append'|'replace';
+                        const next = { ...insertModes, [sec]: val };
+                        setInsertModes(next);
+                        try { await chrome.storage.local.set({ INSERT_MODES: next }); toast.push('Insert mode saved'); } catch {}
+                      }}
+                    >
+                      <option value="append">Append</option>
+                      <option value="replace">Replace</option>
+                    </select>
+                  </label>
+                ))}
                 <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                   <span>Auto-pair on allowed hosts</span>
                   <input
@@ -2163,6 +2298,21 @@ ${section.join(' ')}`;
                 </div>
                 <div className="text-sm font-medium mt-3">Telemetry (local)</div>
                 <div className="text-[12px] text-slate-700">
+                  <div className="mb-2 rounded-md border border-slate-200 bg-white/90 p-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div>Insert latency p50: <span className="font-semibold">{metrics.p50} ms</span></div>
+                        <div>Insert latency p95: <span className="font-semibold">{metrics.p95} ms</span></div>
+                      </div>
+                      <div className="text-right">
+                        <div>Inserts: <span className="font-semibold">{metrics.inserts}</span></div>
+                        <div>Verify fails: <span className="font-semibold text-amber-700">{metrics.verifyFail}</span></div>
+                      </div>
+                    </div>
+                    <div className="mt-2">
+                      <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={refreshMetrics}>Refresh</button>
+                    </div>
+                  </div>
                   We store recent timing and outcome events locally to help debug (no network). You can export or clear them here.
                   <div className="mt-2 flex gap-2">
                     <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => {

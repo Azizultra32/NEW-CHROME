@@ -1,5 +1,14 @@
 const TAG = 'BG';
 
+// Silence console in production to reduce noise/PHI risk
+try {
+  const PROD = true; // static for MV3 build copy
+  if (PROD) {
+    console.log = () => {};
+    console.warn = () => {};
+  }
+} catch {}
+
 try {
   importScripts('background/windowPairing.js', 'background/windowTracking.js');
 } catch (error) {
@@ -19,12 +28,17 @@ function clearReconnectTimer() {
 }
 
 async function presign(encounterId) {
+  const fetchWithTimeout = async (url, init = {}, timeoutMs = 30000) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try { return await fetch(url, { ...init, signal: ctrl.signal }); } finally { clearTimeout(t); }
+  };
   const API_BASE = await resolveApiBase();
-  const res = await fetch(`${API_BASE}/v1/encounters/${encounterId}/presign`, {
+  const res = await fetchWithTimeout(`${API_BASE}/v1/encounters/${encounterId}/presign`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode: 'whisper' })
-  });
+  }, 30000);
   const text = await res.text();
   const json = JSON.parse(text || '{}');
   const { wssUrl, headers } = json || {};

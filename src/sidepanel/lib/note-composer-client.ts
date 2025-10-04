@@ -5,6 +5,7 @@
  */
 
 import type { PHIMap } from './phi-rehydration';
+import { fetchWithTimeout } from './net';
 
 export interface ComposedNote {
   sections: Record<string, string>;
@@ -62,7 +63,7 @@ export async function composeNote(
 
   const url = `${apiBase}/v1/encounters/${encounterId}/compose`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -73,7 +74,7 @@ export async function composeNote(
       noteFormat,
       specialty
     })
-  });
+  }, 30000);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Unknown error' }));
