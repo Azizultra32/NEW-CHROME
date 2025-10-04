@@ -35,8 +35,15 @@ export class SpeechRecognitionManager {
   }
 
   private initialize() {
+    // SpeechRecognition API not available in extension contexts (side panels)
+    // Audio capture handled by offscreen document instead
+    if (chrome?.runtime?.id) {
+      // Extension context - skip browser SpeechRecognition (use offscreen/WebRTC)
+      return;
+    }
+
     const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    
+
     if (!SpeechRecognition) {
       console.error('[SpeechRecognition] Not supported in this browser');
       this.setState('error');
