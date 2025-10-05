@@ -18,7 +18,7 @@ import { isDevelopmentBuild } from './lib/env';
 import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
 import { WindowIndicator } from './components/WindowIndicator';
 import { phiKeyManager, storePHIMap, loadPHIMap, PHIMap, deletePHIMap } from './lib/phi-rehydration';
-import { composeNote, ComposedNote, extractSectionText } from './lib/note-composer-client';
+import { composeNote, ComposedNote, extractSectionText, formatProvenanceTime, getNoteSummary } from './lib/note-composer-client';
 import { captureAndSendScreenshot, flushAuditQueue } from './lib/auditCapture';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
@@ -55,6 +55,7 @@ function AppInner() {
   const [auditScreenshots, setAuditScreenshots] = useState(false);
   const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
   const [metrics, setMetrics] = useState<{ verifyFail: number; inserts: number; p50: number; p95: number }>({ verifyFail: 0, inserts: 0, p50: 0, p95: 0 });
+  const [showCitations, setShowCitations] = useState(false);
 
   const refreshMetrics = useCallback(async () => {
     try {
@@ -2514,29 +2515,122 @@ ${section.join(' ')}`;
             />
             {composedNote && (
               <div className="mt-3 rounded-lg border border-slate-200 bg-white/90 p-3 space-y-2">
-                <div className="text-sm font-medium">Composed Note</div>
-                {Object.entries(composedNote.sections).map(([sec, txt]) => (
-                  <div key={sec} className="border border-slate-100 rounded-md p-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium">Composed Note</div>
+                  <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
+                </div>
+                {Object.entries(composedNote.sections).map(([sec, txt]) => {
+                  // Render text with clickable timestamp links
+                  const renderTextWithTimestamps = (text: string) => {
+                    const timestampRegex = /\[(\d{2}:\d{2}(?::\d{2})?)\]/g;
+                    const parts: (string | JSX.Element)[] = [];
+                    let lastIndex = 0;
+                    let match;
+                    let keyCounter = 0;
+
+                    while ((match = timestampRegex.exec(text)) !== null) {
+                      // Add text before timestamp
+                      if (match.index > lastIndex) {
+                        parts.push(text.slice(lastIndex, match.index));
+                      }
+                      // Add clickable timestamp
+                      const timestamp = match[1];
+                      parts.push(
+                        <button
+                          key={`ts-${keyCounter++}`}
+                          className="text-indigo-600 hover:text-indigo-800 hover:underline font-mono text-[11px] mx-0.5"
+                          onClick={() => toast.push(`Jump to ${timestamp} (audio playback not yet wired)`)}
+                          title={`Jump to ${timestamp} in transcript`}
+                        >
+                          [{timestamp}]
+                        </button>
+                      );
+                      lastIndex = match.index + match[0].length;
+                    }
+                    // Add remaining text
+                    if (lastIndex < text.length) {
+                      parts.push(text.slice(lastIndex));
+                    }
+                    return parts.length > 0 ? parts : text;
+                  };
+
+                  return (
+                    <div key={sec} className="border border-slate-100 rounded-md p-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-semibold">{sec}</div>
+                        <button
+                          className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
+                          onClick={() => insertComposed(sec)}
+                        >
+                          Insert {sec}
+                        </button>
+                      </div>
+                      <div className="mt-1 text-[12px] whitespace-pre-wrap text-slate-700">
+                        {renderTextWithTimestamps(String(txt || '').slice(0, 800))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {composedNote.flags?.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                    <div className="font-semibold text-amber-900 flex items-center gap-2">
+                      ⚠️ Safety Warnings ({composedNote.flags.length})
+                    </div>
+                    {composedNote.flags.map((f, i) => {
+                      const severityColor = f.severity === 'high' ? 'text-rose-700 bg-rose-100' : f.severity === 'medium' ? 'text-amber-700 bg-amber-100' : 'text-slate-700 bg-slate-100';
+                      return (
+                        <div key={i} className={`rounded-md px-2 py-1 text-xs ${severityColor}`}>
+                          <span className="font-semibold uppercase">[{f.severity}]</span> {f.text}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {Array.isArray(composedNote.provenance) && composedNote.provenance.length > 0 && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
                     <div className="flex items-center justify-between">
-                      <div className="text-xs font-semibold">{sec}</div>
-                      <button
-                        className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                        onClick={() => insertComposed(sec)}
-                      >
-                        Insert {sec}
+                      <div className="font-semibold text-slate-900">🕓 Citations</div>
+                      <button className="px-2 py-0.5 text-xs rounded-md border border-slate-300" onClick={() => setShowCitations(v => !v)}>
+                        {showCitations ? 'Hide' : 'Show'} ({composedNote.provenance.length})
                       </button>
                     </div>
-                    <div className="mt-1 text-[12px] whitespace-pre-wrap text-slate-700">
-                      {String(txt || '').slice(0, 800)}
-                    </div>
+                    {showCitations && (
+                      <div className="text-[12px] text-slate-700 space-y-1">
+                        {composedNote.provenance.slice(0, 8).map((p, i) => (
+                          <div key={i}>• {formatProvenanceTime(p.timestamp)} {p.section ? `${p.section} — ` : ''}{p.sentence}</div>
+                        ))}
+                        {composedNote.provenance.length > 8 && (
+                          <div className="text-slate-500">…and {composedNote.provenance.length - 8} more</div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                ))}
-                {composedNote.flags?.length > 0 && (
-                  <div className="text-[12px] text-slate-700">
-                    <div className="font-medium">Safety flags</div>
-                    {composedNote.flags.map((f, i) => (
-                      <div key={i}>• [{f.severity}] {f.text}</div>
-                    ))}
+                )}
+                {(composedNote as any).billing && (
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-2">
+                    <div className="font-semibold text-indigo-900">💼 Billing Codes</div>
+                    {(composedNote as any).billing.icd10?.length > 0 && (
+                      <div>
+                        <div className="text-xs font-medium text-indigo-800 mb-1">ICD-10 Diagnoses</div>
+                        {(composedNote as any).billing.icd10.map((code: any, i: number) => (
+                          <div key={i} className="text-xs text-indigo-700 ml-2">
+                            • <span className="font-mono">{code.code}</span> - {code.description}
+                            <span className="text-indigo-500 ml-1">({code.confidence})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(composedNote as any).billing.cpt?.length > 0 && (
+                      <div>
+                        <div className="text-xs font-medium text-indigo-800 mb-1">CPT Procedures</div>
+                        {(composedNote as any).billing.cpt.map((code: any, i: number) => (
+                          <div key={i} className="text-xs text-indigo-700 ml-2">
+                            • <span className="font-mono">{code.code}</span> - {code.description}
+                            <span className="text-indigo-500 ml-1">({code.confidence})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

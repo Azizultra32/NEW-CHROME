@@ -80,7 +80,8 @@ REQUIREMENTS:
 3. Include timestamp citations for each statement: [MM:SS]
 4. Flag uncertain statements with ⚠️ (e.g., "possibly", "may be", "unclear")
 5. Highlight contradictions between subjective and objective findings
-6. ${guidelines}
+6. Suggest ICD-10 diagnosis codes and CPT procedure codes based on encounter
+7. ${guidelines}
 
 OUTPUT FORMAT:
 Return a JSON object with this structure:
@@ -105,7 +106,15 @@ Return a JSON object with this structure:
       "section": "section_name",
       "severity": "low" | "medium" | "high"
     }
-  ]
+  ],
+  "billing": {
+    "icd10": [
+      {"code": "A00.0", "description": "Brief description", "confidence": "high|medium|low"}
+    ],
+    "cpt": [
+      {"code": "99213", "description": "Brief description", "confidence": "high|medium|low"}
+    ]
+  }
 }
 
 IMPORTANT:
