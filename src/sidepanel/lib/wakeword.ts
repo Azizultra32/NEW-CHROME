@@ -16,7 +16,7 @@ export interface WakeWordOptions {
 }
 
 export class WakeWordDetector {
-  private recognition: SpeechRecognition | null = null;
+  private recognition: any | null = null;
   private state: RecordingState = RecordingState.IDLE;
   private onWakeDetected?: () => void;
   private onStateChange?: (state: RecordingState) => void;
@@ -44,7 +44,7 @@ export class WakeWordDetector {
     this.recognition.interimResults = true;
     this.recognition.lang = 'en-US';
 
-    this.recognition.onresult = (event: SpeechRecognitionEvent) => {
+    this.recognition.onresult = (event: any) => {
       this.handleResult(event);
     };
 
@@ -64,13 +64,13 @@ export class WakeWordDetector {
     };
   }
 
-  private handleResult(event: SpeechRecognitionEvent) {
+  private handleResult(event: any) {
     // Only detect wake word in IDLE state
     if (this.state !== RecordingState.IDLE) return;
 
     // Concatenate all results
     const transcript = Array.from(event.results)
-      .map((r) => r[0].transcript.toLowerCase())
+      .map((r: any) => r[0].transcript.toLowerCase())
       .join(' ');
 
     console.log('[WakeWord] Heard:', transcript.slice(0, 50));

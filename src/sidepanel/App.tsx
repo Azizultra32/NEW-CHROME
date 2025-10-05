@@ -20,6 +20,10 @@ import { WindowIndicator } from './components/WindowIndicator';
 import { phiKeyManager, storePHIMap, loadPHIMap, PHIMap, deletePHIMap } from './lib/phi-rehydration';
 import { composeNote, ComposedNote, extractSectionText, formatProvenanceTime, getNoteSummary } from './lib/note-composer-client';
 import { captureAndSendScreenshot, flushAuditQueue } from './lib/auditCapture';
+import { tts } from './lib/tts';
+import { wakeWord, RecordingState } from './lib/wakeword';
+import { ChatMessage, ChatLog } from './components/ChatBubble';
+import { commandTagger } from './lib/command-tagger';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
@@ -84,6 +88,12 @@ function AppInner() {
   const [windowTrackState, setWindowTrackState] = useState<{ sidepanelWindowId: number | null; lastKnown: { title?: string; url?: string } | null }>({ sidepanelWindowId: null, lastKnown: null });
   // Auto-pair on allowed hosts (persisted in chrome.storage.local as WINDOW_PAIR_AUTO)
   const [autoPairOnAllowed, setAutoPairOnAllowed] = useState(false);
+
+  // Chat log for assistant messages
+  const [chatLog, setChatLog] = useState<ChatMessage[]>([]);
+
+  // Wake word state
+  const [wakeWordState, setWakeWordState] = useState<RecordingState>(RecordingState.IDLE);
 
   const defaultTemplates: Record<Section, string> = {
     PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
@@ -209,6 +219,59 @@ function AppInner() {
         console.warn('Failed to request tabs permission:', e);
       }
     })();
+  }, []);
+
+  // Initialize TTS ducking and wake word on mount
+  useEffect(() => {
+    console.log('[App] Initializing TTS and Wake Word');
+
+    // Set up TTS ducking callbacks (pause mic during AI speech)
+    tts.setDuckingCallbacks(
+      () => {
+        // On speak start: pause wake word detector
+        console.log('[App] TTS started - pausing wake word');
+        wakeWord.pause();
+        commandMuteUntilRef.current = Date.now() + 3000; // 3s mute window
+      },
+      () => {
+        // On speak end: resume wake word detector
+        console.log('[App] TTS ended - resuming wake word');
+        wakeWord.resume();
+      }
+    );
+
+    // Set up wake word callbacks
+    wakeWord.setWakeCallback(() => {
+      console.log('[App] Wake word detected - ARMED');
+      speakAndLog('Listening', 'assist');
+      // Tag command audio for suppression
+      commandTagger.markCommandDetected();
+    });
+
+    wakeWord.setStateChangeCallback((state) => {
+      console.log('[App] Wake word state:', state);
+      setWakeWordState(state);
+
+      if (state === RecordingState.ARMED) {
+        setCommandFeedback('🎤 Listening... (say your command)');
+      } else if (state === RecordingState.RECORDING) {
+        setCommandFeedback('🔴 Recording...');
+        // Auto-start recording if not already
+        if (!recordingRef.current && !busyRef.current) {
+          onToggleRef.current?.();
+        }
+      } else if (state === RecordingState.IDLE) {
+        setCommandFeedback(BASE_COMMAND_MESSAGE);
+      }
+    });
+
+    // Start wake word detector
+    wakeWord.start();
+
+    return () => {
+      wakeWord.stop();
+      tts.cancel();
+    };
   }, []);
 
   useEffect(() => {
@@ -374,12 +437,30 @@ function AppInner() {
 
   function speak(text: string) {
     try {
-      const utterance = new SpeechSynthesisUtterance(text);
+      // Add to chat log
+      setChatLog(prev => [...prev, {
+        message: text,
+        type: 'assistant',
+        timestamp: new Date()
+      }]);
+
+      // Speak with TTS engine (handles ducking automatically)
+      tts.speak(text).catch(console.error);
+
+      // Legacy mute window for compatibility
       try { commandMuteUntilRef.current = Math.max(commandMuteUntilRef.current, Date.now() + 800); } catch {}
-      utterance.onstart = () => { try { commandMuteUntilRef.current = Date.now() + 1200; } catch {} };
-      utterance.onend = () => { try { commandMuteUntilRef.current = Date.now(); } catch {} };
-      speechSynthesis?.speak(utterance);
     } catch {}
+  }
+
+  function speakAndLog(text: string, userMessage?: string) {
+    if (userMessage) {
+      setChatLog(prev => [...prev, {
+        message: userMessage,
+        type: 'user',
+        timestamp: new Date()
+      }]);
+    }
+    speak(text);
   }
 
   const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string; selector: string; bypassGuard?: boolean }>(null);
@@ -519,13 +600,21 @@ function AppInner() {
   }
 
   function computeGhostSections(): Partial<Record<Section, string>> {
-    const plan = getTranscriptPayload();
-    const out: Partial<Record<Section, string>> = { PLAN: plan };
+    // Prefer composed note's Plan if available; otherwise use live transcript payload
+    let planText = getTranscriptPayload();
+    try {
+      if (composedNote && composedNote.sections) {
+        planText = composedNote.sections['Plan'] || composedNote.sections['PLAN'] || planText;
+      }
+    } catch {}
+    const out: Partial<Record<Section, string>> = { PLAN: planText };
     try {
       if (features.multi) {
-        out.HPI = (defaultTemplates as any).HPI || '';
-        out.ROS = (defaultTemplates as any).ROS || '';
-        out.EXAM = (defaultTemplates as any).EXAM || '';
+        // Optional fill for other legacy sections if you want a multi‑section preview
+        // These remain placeholders unless you add explicit mapping from composedNote
+        out.HPI = out.HPI || '';
+        out.ROS = out.ROS || '';
+        out.EXAM = out.EXAM || '';
       }
     } catch {}
     return out;
@@ -1209,6 +1298,32 @@ function AppInner() {
     }
   }, [allowedHosts, ensurePerms, getContentTab, onTogglePairing, toast]);
 
+  // Move activateMapMode here (before mapSoapHere that uses it)
+  const activateMapMode = useCallback(async (section: Section) => {
+    const activeTab = await getContentTab();
+    if (!activeTab?.id) {
+      toast.push('No active tab');
+      return false;
+    }
+    try {
+      await ensurePerms();
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
+    } catch (primaryErr) {
+      console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
+      try {
+        await ensurePerms();
+        await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] });
+        await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
+      } catch (fallbackErr) {
+        console.error('MAP_MODE fallback failed', fallbackErr);
+        toast.push('Unable to enter map mode — reload the EHR tab and try again.');
+        return false;
+      }
+    }
+    toast.push(`Click a ${section} field to map`);
+    return true;
+  }, [toast, getContentTab, ensurePerms]);
+
   // Quick action: start mapping PLAN (SOAP) in the current tab
   const mapSoapHere = useCallback(async () => {
     try {
@@ -1387,30 +1502,7 @@ function AppInner() {
     };
   }, []);
 
-  const activateMapMode = useCallback(async (section: Section) => {
-    const activeTab = await getContentTab();
-    if (!activeTab?.id) {
-      toast.push('No active tab');
-      return false;
-    }
-    try {
-      await ensurePerms();
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
-    } catch (primaryErr) {
-      console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
-      try {
-        await ensurePerms();
-        await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] });
-        await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
-      } catch (fallbackErr) {
-        console.error('MAP_MODE fallback failed', fallbackErr);
-        toast.push('Unable to enter map mode — reload the EHR tab and try again.');
-        return false;
-      }
-    }
-    toast.push(`Click a ${section} field to map`);
-    return true;
-  }, [toast, getContentTab]);
+  // activateMapMode moved earlier (before mapSoapHere) - removed duplicate
 
   const onMapFields = useCallback(async () => {
     const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
@@ -2478,6 +2570,17 @@ ${section.join(' ')}`;
             )}
             <CommandStrip message={commandMessage} speechState={speechRecognitionState} />
             <TranscriptList />
+
+            {/* Chat Log for Assistant Messages */}
+            {chatLog.length > 0 && (
+              <div className="mt-4 mb-4">
+                <div className="text-xs font-semibold text-gray-400 mb-2 px-1">
+                  💬 Assistant Chat
+                </div>
+                <ChatLog messages={chatLog} autoScroll={true} />
+              </div>
+            )}
+
             {wsMonitor}
             {commandLog.length > 0 && (
               <div className="text-[11px] text-slate-500 space-y-1 border border-slate-200 bg-white/80 rounded-lg px-3 py-2">
@@ -2519,6 +2622,7 @@ ${section.join(' ')}`;
                   <div className="text-sm font-medium">Composed Note</div>
                   <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
                 </div>
+                
                 {Object.entries(composedNote.sections).map(([sec, txt]) => {
                   // Render text with clickable timestamp links
                   const renderTextWithTimestamps = (text: string) => {
