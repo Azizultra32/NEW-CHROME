@@ -5,6 +5,7 @@ import { CommandStrip } from './components/CommandStrip';
 import { TranscriptList } from './components/TranscriptList';
 import { Controls } from './components/Controls';
 import { ToastProvider, useToast } from './components/Toast';
+import { QuickStartGuide } from './components/QuickStartGuide';
 import { UI } from './lib/ui-tokens';
 import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
@@ -49,6 +50,7 @@ function AppInner() {
   const [host, setHost] = useState<string>('');
   const [profile, setProfile] = useState<Record<Section, FieldMapping>>({} as any);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [redactedOverlay, setRedactedOverlay] = useState(false);
   const [auditScreenshots, setAuditScreenshots] = useState(false);
   const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
@@ -826,13 +828,21 @@ function AppInner() {
           console.log('[AssistMD] Speech recognition state:', state);
           setSpeechRecognitionState(state);
         },
-        onError: (error) => {
-          console.error('[AssistMD] Speech recognition error:', error);
-          if (error !== 'Microphone permission denied') {
-            // Don't show toast for minor errors
-            return;
+        onError: async (error) => {
+          if ((window as any).__ASSIST_DEBUG) console.error('[AssistMD] Speech recognition error:', error);
+          // Permission denied: try to nudge permission once, then retry
+          if (error === 'Microphone permission denied') {
+            try {
+              await navigator.mediaDevices.getUserMedia({ audio: true });
+              setTimeout(() => { try { speechManagerRef.current?.start(); } catch {} }, 300);
+              toast.push('Mic permission granted. Resuming voice.');
+              return;
+            } catch {
+              toast.push('Voice error: Microphone permission denied');
+              return;
+            }
           }
-          toast.push(`Voice error: ${error}`);
+          // Minor errors: let SR manager auto-retry silently
         },
         continuous: true,
         interimResults: false
@@ -1171,6 +1181,59 @@ function AppInner() {
       toast.push('Restore failed');
     }
   }, [toast]);
+
+  // Quick action: pair to the current tab (grant perms, allowlist host, enable pairing)
+  const pairToThisTab = useCallback(async () => {
+    try {
+      const tab = await getContentTab();
+      if (!tab?.url) { toast.push('No active tab'); return; }
+      // Ensure we can inject on this origin
+      const ok = await ensurePerms();
+      if (!ok) { toast.push('Permission denied for this site'); return; }
+      // Add to allowlist if not present
+      try {
+        const u = new URL(tab.url);
+        const h = u.hostname;
+        if (h) {
+          const next = Array.from(new Set([...(allowedHosts || []), h])).sort();
+          await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+          setAllowedHosts(next);
+        }
+      } catch {}
+      // Turn on pairing
+      await onTogglePairing(true);
+      toast.push('Paired to this tab');
+    } catch {
+      toast.push('Pairing failed');
+    }
+  }, [allowedHosts, ensurePerms, getContentTab, onTogglePairing, toast]);
+
+  // Quick action: start mapping PLAN (SOAP) in the current tab
+  const mapSoapHere = useCallback(async () => {
+    try {
+      const ok = await activateMapMode('PLAN');
+      if (!ok) return;
+    } catch {
+      toast.push('Unable to start mapping');
+    }
+  }, [activateMapMode, toast]);
+
+  // First‑time inline tip under header (persist dismiss)
+  const [tipOpen, setTipOpen] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { TIP_SEEN } = await chrome.storage.local.get(['TIP_SEEN']);
+        setTipOpen(!TIP_SEEN);
+      } catch {
+        setTipOpen(true);
+      }
+    })();
+  }, []);
+  const dismissTip = useCallback(async () => {
+    setTipOpen(false);
+    try { await chrome.storage.local.set({ TIP_SEEN: true }); } catch {}
+  }, []);
 
   const onSelfTestPresign = useCallback(async () => {
     try {
@@ -1566,6 +1629,11 @@ ${section.join(' ')}`;
               setEncounterId(null);
             }
           } catch {}
+          // Recreate speech recognition manager on stop to avoid invalid state
+          if (speechManagerRef.current) {
+            try { speechManagerRef.current.destroy(); } catch {}
+            speechManagerRef.current = null;
+          }
         }
         if (m.status === 'error') {
           setRecording(false);
@@ -1696,7 +1764,7 @@ ${section.join(' ')}`;
 
   const panelStyle = useMemo(() => ({
     minHeight: '100vh',
-    width: UI.panel.width + 'px',
+    width: '100%',
     maxWidth: UI.panel.width + 'px',
     borderRadius: UI.panel.radius,
     backdropFilter: 'blur(14px)',
@@ -1924,17 +1992,36 @@ ${section.join(' ')}`;
             onTogglePairing={onTogglePairing}
             onToggleFocus={() => setFocusMode((v) => !v)}
             onOpacity={setOpacity}
+            onOpenHelp={() => setHelpOpen(true)}
             onOpenSettings={() => setSettingsOpen((v) => !v)}
           />
+          {tipOpen && (
+            <div className="rounded-md border border-slate-200 bg-indigo-50/80 px-2 py-1 text-[12px] text-slate-800 flex items-center justify-between">
+              <div>
+                First time? 1) <button className="underline" onClick={() => pairToThisTab()}>Pair</button> · 2) <button className="underline" onClick={() => mapSoapHere()}>Map SOAP</button> · 3) Preview (Alt+G) · 4) Insert (Alt+Enter)
+              </div>
+              <button aria-label="Dismiss tip" className="ml-2 px-1 text-slate-600 hover:text-slate-900" onClick={dismissTip}>✕</button>
+            </div>
+          )}
           <div className="flex items-center justify-between text-[12px] text-slate-600">
             <div>
               Inserts: <span className="font-semibold">{metrics.inserts}</span> · Verify fails: <span className="font-semibold text-amber-700">{metrics.verifyFail}</span> · p50: <span className="font-semibold">{metrics.p50} ms</span> · p95: <span className="font-semibold">{metrics.p95} ms</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
                 onClick={async () => { try { await refreshMetrics(); } catch {} }}
               >Refresh</button>
+              <button
+                title="Pair to this tab"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => pairToThisTab()}
+              >Pair to tab</button>
+              <button
+                title="Map SOAP (PLAN) to the editor you click"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => mapSoapHere()}
+              >Map SOAP here</button>
               <button
                 title="Privacy Shield"
                 className={`px-2 py-0.5 text-xs rounded-md border ${redactedOverlay && !auditScreenshots ? 'border-emerald-500 text-emerald-700' : 'border-slate-300'}`}
@@ -2360,6 +2447,15 @@ ${section.join(' ')}`;
                   </div>
                 </div>
               </div>
+            )}
+            {helpOpen && (
+              <QuickStartGuide
+                onClose={() => setHelpOpen(false)}
+                onOpenSettings={() => {
+                  setHelpOpen(false);
+                  setSettingsOpen(true);
+                }}
+              />
             )}
             {wsState === 'connecting' && (
               <div className="text-xs text-slate-500">Connecting to ASR…</div>

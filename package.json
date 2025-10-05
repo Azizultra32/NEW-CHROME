@@ -17,7 +17,8 @@
     "dev:backend": "cd backend && npm run dev",
     "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
     "test:e2e": "playwright test || echo 'Playwright not installed in CI'",
-    "test:e2e:chrome": "node scripts/run-extension-e2e.mjs"
+    "test:e2e:chrome": "node scripts/run-extension-e2e.mjs",
+    "smoke:backend": "node -e \"fetch('http://localhost:8080/health',{duplex:'half'}).then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}).catch(e=>{console.error('health failed');process.exit(1)})\""
   },
   "dependencies": {
     "cors": "^2.8.5",

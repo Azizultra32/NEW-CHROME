@@ -198,6 +198,200 @@ app.post('/v1/audit', (req, res) => {
   res.json({ ok: true });
 });
 
+// ========================================
+// Playwright Worker API Endpoints
+// ========================================
+
+import { worker, jobQueue } from './automation/worker.js';
+
+// Initialize Playwright worker
+app.post('/v1/automation/init', async (req, res) => {
+  try {
+    const { headless = true } = req.body;
+    const sessionId = await worker.init({ headless });
+
+    res.json({
+      success: true,
+      sessionId,
+      message: 'Playwright worker initialized'
+    });
+
+  } catch (error) {
+    console.error('[Automation] Init failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Navigate to EMR page
+app.post('/v1/automation/navigate', async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'Missing url parameter' });
+    }
+
+    await worker.navigate(url);
+
+    res.json({
+      success: true,
+      message: `Navigated to ${url}`
+    });
+
+  } catch (error) {
+    console.error('[Automation] Navigate failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Discover fields on current page
+app.get('/v1/automation/discover', async (req, res) => {
+  try {
+    const fields = await worker.discoverFields();
+
+    res.json({
+      success: true,
+      fields,
+      count: fields.length
+    });
+
+  } catch (error) {
+    console.error('[Automation] Discover failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Paste single section (async job)
+app.post('/v1/automation/paste', async (req, res) => {
+  try {
+    const { section, text, mode = 'replace' } = req.body;
+
+    if (!section || !text) {
+      return res.status(400).json({ error: 'Missing section or text' });
+    }
+
+    const jobId = await jobQueue.submit('paste_single', { section, text, mode });
+
+    res.json({
+      success: true,
+      jobId,
+      message: 'Paste job submitted'
+    });
+
+  } catch (error) {
+    console.error('[Automation] Paste job submission failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Batch paste multiple sections (async job)
+app.post('/v1/automation/paste-batch', async (req, res) => {
+  try {
+    const { sections } = req.body;
+
+    if (!sections || !Array.isArray(sections)) {
+      return res.status(400).json({ error: 'Missing or invalid sections array' });
+    }
+
+    const jobId = await jobQueue.submit('paste_batch', { sections });
+
+    res.json({
+      success: true,
+      jobId,
+      message: 'Batch paste job submitted'
+    });
+
+  } catch (error) {
+    console.error('[Automation] Batch paste job submission failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get job status
+app.get('/v1/automation/job/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  const status = jobQueue.getJobStatus(jobId);
+
+  if (!status) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  res.json(status);
+});
+
+// Take screenshot
+app.post('/v1/automation/screenshot', async (req, res) => {
+  try {
+    const { fullPage = true } = req.body;
+    const screenshot = await worker.screenshot({ fullPage });
+
+    res.json({
+      success: true,
+      screenshot // base64-encoded PNG
+    });
+
+  } catch (error) {
+    console.error('[Automation] Screenshot failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Worker health check
+app.get('/v1/automation/health', async (req, res) => {
+  try {
+    const health = await worker.healthCheck();
+
+    res.json({
+      success: true,
+      ...health
+    });
+
+  } catch (error) {
+    console.error('[Automation] Health check failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Close worker
+app.post('/v1/automation/close', async (req, res) => {
+  try {
+    await worker.close();
+
+    res.json({
+      success: true,
+      message: 'Playwright worker closed'
+    });
+
+  } catch (error) {
+    console.error('[Automation] Close failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Create HTTP server
 const server = createServer(app);
 

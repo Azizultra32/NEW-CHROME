@@ -23,6 +23,7 @@ export class SpeechRecognitionManager {
   private isDestroyed = false;
   private lastStartTime = 0;
   private minRestartInterval = 500; // Prevent rapid restarts
+  private isStarting = false;
 
   constructor(config: SpeechRecognitionConfig) {
     this.config = {
@@ -60,13 +61,14 @@ export class SpeechRecognitionManager {
     if (!this.recognition) return;
 
     this.recognition.onstart = () => {
-      console.log('[SpeechRecognition] Started');
+      if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Started');
       this.setState('listening');
       this.retryCount = 0; // Reset retry count on successful start
+      this.isStarting = false;
     };
 
     this.recognition.onend = () => {
-      console.log('[SpeechRecognition] Ended', { 
+      if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Ended', { 
         state: this.state, 
         isDestroyed: this.isDestroyed,
         continuous: this.config.continuous 
@@ -75,6 +77,7 @@ export class SpeechRecognitionManager {
       if (this.state === 'listening') {
         this.setState('idle');
       }
+      this.isStarting = false;
 
       // Auto-restart for continuous mode if not explicitly stopped
       if (this.config.continuous && !this.isDestroyed && this.state !== 'paused') {
@@ -84,7 +87,7 @@ export class SpeechRecognitionManager {
 
     this.recognition.onerror = (event: any) => {
       const error = event.error || 'unknown';
-      console.warn('[SpeechRecognition] Error:', error, { retryCount: this.retryCount });
+      if ((window as any).__ASSIST_DEBUG) console.warn('[SpeechRecognition] Error:', error, { retryCount: this.retryCount });
 
       // Handle specific error types
       switch (error) {
@@ -130,7 +133,7 @@ export class SpeechRecognitionManager {
 
       const transcript = lastResult[0]?.transcript?.trim();
       if (transcript) {
-        console.log('[SpeechRecognition] Result:', transcript);
+        if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Result:', transcript);
         this.config.onResult?.(transcript);
       }
     };
@@ -138,7 +141,7 @@ export class SpeechRecognitionManager {
 
   private setState(newState: SpeechRecognitionState) {
     if (this.state !== newState) {
-      console.log('[SpeechRecognition] State change:', this.state, '->', newState);
+      if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] State change:', this.state, '->', newState);
       this.state = newState;
       this.config.onStateChange?.(newState);
     }
@@ -162,14 +165,14 @@ export class SpeechRecognitionManager {
 
   start(): boolean {
     if (this.isDestroyed || !this.recognition) {
-      console.warn('[SpeechRecognition] Cannot start - destroyed or not initialized');
+      if ((window as any).__ASSIST_DEBUG) console.warn('[SpeechRecognition] Cannot start - destroyed or not initialized');
       return false;
     }
 
     // Prevent rapid restarts
     const now = Date.now();
     if (now - this.lastStartTime < this.minRestartInterval) {
-      console.log('[SpeechRecognition] Skipping start - too soon after last start');
+      if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Skipping start - too soon after last start');
       this.scheduleRestart(this.minRestartInterval);
       return false;
     }
@@ -183,17 +186,19 @@ export class SpeechRecognitionManager {
 
     try {
       // Only start if not already listening
-      if (this.state !== 'listening') {
-        console.log('[SpeechRecognition] Starting...');
+      if (this.state !== 'listening' && !this.isStarting) {
+        if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Starting...');
+        this.isStarting = true;
         this.recognition.start();
         this.retryCount++;
         return true;
       } else {
-        console.log('[SpeechRecognition] Already listening');
+        if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Already listening or starting');
         return true;
       }
     } catch (error: any) {
-      console.error('[SpeechRecognition] Start failed:', error);
+      this.isStarting = false;
+      if ((window as any).__ASSIST_DEBUG) console.error('[SpeechRecognition] Start failed:', error);
       
       // If it's because we're already started, that's okay
       if (error.message?.includes('already started')) {
@@ -213,7 +218,7 @@ export class SpeechRecognitionManager {
   }
 
   stop() {
-    console.log('[SpeechRecognition] Stopping...');
+    if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Stopping...');
     
     // Clear any pending restart
     if (this.restartTimer) {
@@ -233,13 +238,13 @@ export class SpeechRecognitionManager {
   }
 
   pause() {
-    console.log('[SpeechRecognition] Pausing...');
+    if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Pausing...');
     this.setState('paused');
     this.stop();
   }
 
   resume() {
-    console.log('[SpeechRecognition] Resuming...');
+    if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Resuming...');
     if (this.state === 'paused') {
       this.setState('idle');
       this.start();
@@ -247,7 +252,7 @@ export class SpeechRecognitionManager {
   }
 
   destroy() {
-    console.log('[SpeechRecognition] Destroying...');
+    if ((window as any).__ASSIST_DEBUG) console.log('[SpeechRecognition] Destroying...');
     this.isDestroyed = true;
     this.stop();
     
@@ -257,6 +262,7 @@ export class SpeechRecognitionManager {
     }
     
     this.recognition = null;
+    this.isStarting = false;
   }
 
   getState(): SpeechRecognitionState {

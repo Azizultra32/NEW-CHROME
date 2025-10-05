@@ -26,13 +26,13 @@ The extension has solid fundamentals (voice commands, smart paste, PHI protectio
 - Verify-before-paste with patient guard
 - Profile import/export
 
-### 3. Backend Integration (Partial) ⚠️
-- **Status**: BACKEND READY, INTEGRATION PENDING
+### 3. Backend Integration ✅
+- **Status**: BUILT & CONNECTED
 - Complete Node.js backend with OpenAI Realtime API ([backend/server.js:1](backend/server.js:1))
 - PHI pseudonymization ([backend/phi-redactor.js:1](backend/phi-redactor.js:1))
 - Note composer ([backend/note-composer.js:1](backend/note-composer.js:1))
 - Safety rails ([backend/safety-rails.js:1](backend/safety-rails.js:1))
-- **BUT**: Extension still uses mock server, not production backend
+- Extension connects via presign and WebSocket ([background.js:120](../background.js#L120), [server.js:1](../backend/server.js:1))
 
 ### 4. Basic UI Elements ✅
 - Side panel with transcript display
@@ -44,14 +44,14 @@ The extension has solid fundamentals (voice commands, smart paste, PHI protectio
 
 ## ❌ What's Missing (From Original ChatGPT Vision)
 
-### 1. **WAKE WORD / HANDS-FREE START** ❌
+### 1. **WAKE WORD / HANDS-FREE START** ⚠️
 **Original Vision**:
 > "I want the voice command to work during the session while recording... wake phrase 'assist start session' (or your phrase). Until it hears that, nothing is recorded."
 
 **Current Reality**:
-- ❌ No wake word detection
-- ❌ Must manually click "Start Recording"
-- ❌ No keyword spotting (KWS) model
+- ⚠️ Phrase-based wake on "assist …" via partials (no dedicated KWS)
+- ⚠️ Continuous SR auto-restarts; no local wake-word engine yet
+- ❌ No dedicated keyword spotting (KWS) model
 
 **What Was Planned**:
 - Tiny KWS model (MFCC → 1-D CNN compiled to WASM)
@@ -155,7 +155,7 @@ One getUserMedia → AudioWorklet → fan-out:
 
 ---
 
-### 6. **FULL BACKEND INTEGRATION** ⚠️
+### 6. **FULL BACKEND INTEGRATION** ✅
 **Original Vision**:
 > Backend with OpenAI Realtime API, PHI protection, note composer, safety rails
 
@@ -163,17 +163,14 @@ One getUserMedia → AudioWorklet → fan-out:
 - ✅ Backend code complete ([backend/*](backend/))
 - ✅ PHI redactor working
 - ✅ Note composer functional
-- ❌ **Extension not connected to production backend yet**
-- ❌ Still using mock server ([MOCK_SERVER_NOTES.md](MOCK_SERVER_NOTES.md))
-- ❌ No PHI map handling in browser
-- ❌ No "Compose Note" UI button
+- ✅ Extension connects via presign → WS (see above)
+- ✅ PHI map handling (encryption/rehydration) in panel libs
+- ✅ "Compose Note" UI button and display
 
-**What Needs Integration**:
-1. Connect [offscreen.js:196](offscreen.js:196) WebSocket to `ws://localhost:8080/asr`
-2. Add PHI map storage/decryption in browser
-3. Create "Compose Note" button in side panel
-4. Display composed SOAP notes with safety warnings
-5. Test end-to-end: audio → transcript → PHI tokens → SOAP generation
+**What Needs Validation**:
+1. End-to-end smoke: audio → transcript (tokens) → SOAP note → section inserts
+2. Specialty templates and APSO ordering checks
+3. Safety-rails flags surfaced in UI (non-blocking)
 
 **Gap Impact**: 🔴 **CRITICAL** - Backend is "dark" (ready but unused)
 

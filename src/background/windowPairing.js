@@ -4,7 +4,18 @@
 const STORAGE_KEY_ENABLED = 'WINDOW_PAIR_ENABLED';
 const STORAGE_KEY_AUTO = 'WINDOW_PAIR_AUTO';
 const STORAGE_ALLOWED_HOSTS = 'ALLOWED_HOSTS';
-const EMR_PATTERNS = ['epic.com', 'cerner.com', 'athenahealth.com', 'ehr-test.html'];
+// Domains/markers that qualify a tab as an "eligible EHR" when the allowlist is empty
+// Add OSCAR EHR host pattern(s)
+const EMR_PATTERNS = [
+  'epic.com',
+  'cerner.com',
+  'athenahealth.com',
+  'ehr-test.html',
+  // OSCAR EHR (example: https://brentwood.kai-oscar.com/)
+  'kai-oscar.com',
+  'oscar-emr.com',
+  'oscarhq.com'
+];
 
 class WindowPairManager {
   constructor() {
