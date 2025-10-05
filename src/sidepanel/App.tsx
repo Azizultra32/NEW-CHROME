@@ -24,6 +24,7 @@ import { tts } from './lib/tts';
 import { wakeWord, RecordingState } from './lib/wakeword';
 import { ChatMessage, ChatLog } from './components/ChatBubble';
 import { commandTagger } from './lib/command-tagger';
+import { scrapeVitals, formatVitals, scrapeMedications, formatMedications, scrapeAllergies, formatAllergies } from './lib/chart-scraper';
 const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
@@ -60,6 +61,7 @@ function AppInner() {
   const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
   const [metrics, setMetrics] = useState<{ verifyFail: number; inserts: number; p50: number; p95: number }>({ verifyFail: 0, inserts: 0, p50: 0, p95: 0 });
   const [showCitations, setShowCitations] = useState(false);
+  const [singleFieldMode, setSingleFieldMode] = useState(false);
 
   const refreshMetrics = useCallback(async () => {
     try {
@@ -858,6 +860,132 @@ function AppInner() {
         await activateMapMode(section);
         break;
       }
+      case 'query_vitals': {
+        setCommandFeedback('Command: query vitals');
+        commandTagger.markCommandDetected();
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          // Inject content script if needed
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeVitals
+            }).then(async (results) => {
+              const vitals = results[0]?.result;
+              const response = formatVitals(vitals || {});
+              speakAndLog(response, 'vitals?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping vitals:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_vitals:', error);
+          speak('Error querying vitals');
+        }
+        break;
+      }
+
+      case 'query_meds': {
+        setCommandFeedback('Command: query medications');
+        commandTagger.markCommandDetected();
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeMedications
+            }).then(async (results) => {
+              const meds = results[0]?.result;
+              const response = formatMedications(meds || []);
+              speakAndLog(response, 'current meds?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping meds:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_meds:', error);
+          speak('Error querying medications');
+        }
+        break;
+      }
+
+      case 'query_allergies': {
+        setCommandFeedback('Command: query allergies');
+        commandTagger.markCommandDetected();
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeAllergies
+            }).then(async (results) => {
+              const allergies = results[0]?.result;
+              const response = formatAllergies(allergies || []);
+              speakAndLog(response, 'allergies?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping allergies:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_allergies:', error);
+          speak('Error querying allergies');
+        }
+        break;
+      }
+
+      case 'compose_note': {
+        setCommandFeedback('Command: compose note');
+        commandTagger.markCommandDetected();
+        speak('Composing clinical note');
+
+        try {
+          if (!encounterIdRef.current) {
+            speak('No encounter ID set. Please start a session first.');
+            break;
+          }
+
+          const encId = encounterIdRef.current;
+          const phi = {}; // PHI map handled by backend
+          const tokenized = transcript.get().map(t => t.text).join('\n');
+
+          setBusy(true);
+          const note = await composeNote({
+            encounterId: encId,
+            transcript: tokenized,
+            phiMap: phi,
+            apiBase
+          });
+          setComposedNote(note);
+          setBusy(false);
+
+          const sectionCount = Object.keys(note.sections || {}).length;
+          speak(`Note ready with ${sectionCount} sections. Review before inserting.`);
+        } catch (error) {
+          console.error('[App] Error composing note:', error);
+          setBusy(false);
+          speak('Error composing note. Check the backend connection.');
+        }
+        break;
+      }
+
       case 'undo':
         if (!features.undo) { toastRef.current?.push('Undo disabled'); break; }
         setCommandFeedback('Command: undo');
@@ -1402,7 +1530,7 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED, INSERT_MODES } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED','INSERT_MODES']);
+        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED, INSERT_MODES, SINGLE_FIELD_MODE } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED','INSERT_MODES','SINGLE_FIELD_MODE']);
         if (Array.isArray(ALLOWED_HOSTS)) setAllowedHosts(ALLOWED_HOSTS as string[]);
         setAutoPairOnAllowed(!!WINDOW_PAIR_AUTO);
         const val = !!OVERLAY_REDACTED;
@@ -1415,11 +1543,32 @@ function AppInner() {
         if (INSERT_MODES && typeof INSERT_MODES === 'object') {
           setInsertModes((prev) => ({ ...prev, ...(INSERT_MODES as any) }));
         }
+        // Per-host single field mode
+        try {
+          const url = new URL((await getContentTab())?.url || '');
+          const h = url.hostname;
+          const map = (SINGLE_FIELD_MODE && typeof SINGLE_FIELD_MODE === 'object') ? SINGLE_FIELD_MODE as Record<string, boolean> : {};
+          if (h) setSingleFieldMode(!!map[h]);
+        } catch {}
         try { await refreshMetrics(); } catch {}
         try { await flushAuditQueue(); } catch {}
       } catch {}
     })();
   }, []);
+
+  const onToggleSingleFieldMode = useCallback(async (next: boolean) => {
+    try {
+      const bag = await chrome.storage.local.get(['SINGLE_FIELD_MODE']);
+      const map = (bag.SINGLE_FIELD_MODE && typeof bag.SINGLE_FIELD_MODE === 'object') ? bag.SINGLE_FIELD_MODE as Record<string, boolean> : {};
+      if (!host) return;
+      map[host] = next;
+      await chrome.storage.local.set({ SINGLE_FIELD_MODE: map });
+      setSingleFieldMode(next);
+      toast.push(next ? 'Single note field mode enabled' : 'Single note field mode disabled');
+    } catch {
+      toast.push('Failed to update setting');
+    }
+  }, [host, toast]);
 
   // Mapping export/import (per hostname)
   const onExportMappings = useCallback(async () => {
@@ -2232,6 +2381,14 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
+                <div className="mt-2 rounded-md border border-slate-200 p-2">
+                  <div className="text-[12px] font-medium text-slate-800 mb-1">Note Field Mode</div>
+                  <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                    <input type="checkbox" checked={singleFieldMode} onChange={(e) => onToggleSingleFieldMode(e.target.checked)} />
+                    Single note field mode for this site ({host || 'unknown'})
+                  </label>
+                  <div className="text-[11px] text-slate-500 mt-1">If your EHR uses a single editor for the entire note, enable this to focus previews and inserts on that one field.</div>
+                </div>
                 <div className="text-sm font-medium mt-3">Overlay</div>
                 <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                   <span>Redact ghost preview text</span>
@@ -2623,7 +2780,7 @@ ${section.join(' ')}`;
                   <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
                 </div>
                 
-                {Object.entries(composedNote.sections).map(([sec, txt]) => {
+                {!singleFieldMode && Object.entries(composedNote.sections).map(([sec, txt]) => {
                   // Render text with clickable timestamp links
                   const renderTextWithTimestamps = (text: string) => {
                     const timestampRegex = /\[(\d{2}:\d{2}(?::\d{2})?)\]/g;

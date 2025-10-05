@@ -10,7 +10,11 @@ export type Intent =
   | { name: 'template'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
   | { name: 'map'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
   | { name: 'template_edit'; section: 'plan' | 'hpi' | 'ros' | 'exam' }
-  | { name: 'undo' };
+  | { name: 'undo' }
+  | { name: 'query_vitals' }
+  | { name: 'query_meds' }
+  | { name: 'query_allergies' }
+  | { name: 'compose_note' };
 
 export function parseIntent(raw: string): Intent | null {
   const s = normalize(raw);
@@ -41,7 +45,15 @@ export function parseIntent(raw: string): Intent | null {
   if (t) return { name: 'template', section: t[2] as any };
   // Undo
   if (/^undo( insert)?$/.test(rest)) return { name: 'undo' };
-  
+
+  // Knowledge queries
+  if (/^(what are|show|get|tell me)? ?(the )?(current )?vitals?\??$/.test(rest)) return { name: 'query_vitals' };
+  if (/^(what are|show|get|tell me)? ?(the )?(current )?(meds?|medications?)\??$/.test(rest)) return { name: 'query_meds' };
+  if (/^(what are|show|get|tell me)? ?(the )?(current )?allergies\??$/.test(rest)) return { name: 'query_allergies' };
+
+  // Compose note
+  if (/^(compose|generate|create|write) (the )?note$/.test(rest)) return { name: 'compose_note' };
+
   return null;
 }
 
