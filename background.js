@@ -10,7 +10,7 @@ try {
 } catch {}
 
 try {
-  importScripts('background/windowPairing.js', 'background/windowTracking.js');
+importScripts('background/windowPairing.js', 'background/windowTracking.js');
 } catch (error) {
   console.warn(`[${TAG}] failed to import pairing helpers`, error);
 }
@@ -20,6 +20,10 @@ let asrActive = false;
 let lastEncounterId = null;
 let reconnectTimer = null;
 let reconnectDelayMs = 1000; // backoff up to 10s
+
+// Pinned popup management (e.g., EHR plan popup) — keep connected to parent window
+const pinnedPopups = new Map(); // popupWindowId -> parentWindowId
+const parentHasPopup = new Map(); // parentWindowId -> popupWindowId
 
 function clearReconnectTimer() {
   try { if (reconnectTimer) clearTimeout(reconnectTimer); } catch {}
@@ -300,3 +304,79 @@ chrome.runtime.onMessage.addListener((msg, sender, send) => {
   })();
   return true;
 });
+
+// ----- EHR Plan Popup Pinning (keep connected to parent EMR window) -----
+async function repositionPinnedPopup(parentWindowId) {
+  try {
+    const popupId = parentHasPopup.get(parentWindowId);
+    if (!popupId) return;
+    const emr = await chrome.windows.get(parentWindowId);
+    const width = 600;
+    const height = 700;
+    const left = (emr.left ?? 0) + Math.max((emr.width ?? 0) - width - 20, 0);
+    const top = (emr.top ?? 0) + 40;
+    try { await chrome.windows.update(popupId, { left, top, width, height }); } catch {}
+    // Try to make it always on top if the platform supports it (best-effort)
+    try { await chrome.windows.update(popupId, { alwaysOnTop: true }); } catch {}
+  } catch {}
+}
+
+// Detect when the extension's ehr-popup.html opens in a new window (via window.open)
+try {
+  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (!tab || changeInfo.status !== 'complete') return;
+    const url = String(tab.url || '');
+    if (!url.includes('ehr-popup.html')) return;
+    try {
+      // Map popup window to its opener's window
+      const openerId = tab.openerTabId;
+      if (typeof openerId === 'number') {
+        try {
+          const openerTab = await chrome.tabs.get(openerId);
+          if (openerTab && typeof openerTab.windowId === 'number') {
+            const parentId = openerTab.windowId;
+            const popupWindowId = tab.windowId;
+            if (typeof popupWindowId === 'number') {
+              pinnedPopups.set(popupWindowId, parentId);
+              parentHasPopup.set(parentId, popupWindowId);
+              await repositionPinnedPopup(parentId);
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  });
+
+  // Reposition popup when parent moves/resizes
+  chrome.windows.onBoundsChanged.addListener(async (windowId) => {
+    if (!parentHasPopup.has(windowId)) return;
+    await repositionPinnedPopup(windowId);
+  });
+
+  // Keep popup above by focusing it when parent regains focus (best-effort)
+  chrome.windows.onFocusChanged.addListener(async (windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+    const popupId = parentHasPopup.get(windowId);
+    if (!popupId) return;
+    try { await chrome.windows.update(popupId, { focused: true }); } catch {}
+  });
+
+  // Cleanup bookkeeping
+  chrome.windows.onRemoved.addListener((windowId) => {
+    if (pinnedPopups.has(windowId)) {
+      const parentId = pinnedPopups.get(windowId);
+      pinnedPopups.delete(windowId);
+      if (parentHasPopup.get(parentId) === windowId) {
+        parentHasPopup.delete(parentId);
+      }
+      return;
+    }
+    if (parentHasPopup.has(windowId)) {
+      const popupId = parentHasPopup.get(windowId);
+      parentHasPopup.delete(windowId);
+      if (pinnedPopups.get(popupId) === windowId) pinnedPopups.delete(popupId);
+    }
+  });
+} catch (e) {
+  console.warn('[BG] popup pinning listeners failed to initialize', e);
+}
