@@ -148,6 +148,10 @@
   chrome.runtime.onMessage.addListener((m)=>{
     if (!extAlive()) return;
     if (m?.type==='MAP_MODE') toggle(!!m.on, m.section||'PLAN');
+    // Lightweight HUD indicator for short-lived states (e.g., command mode)
+    if (m?.type === 'COMMAND_WINDOW') {
+      try { showHudBadge(m.text || 'Command mode', m.ms || 1200); } catch {}
+    }
     if (m?.type === 'INSERT_TEXT') {
       const el = document.activeElement;
       if (!el) return;
@@ -197,6 +201,38 @@
     if (!root) return;
     for (const n of __assistGhostNodes) { try { n.remove(); } catch {} }
     __assistGhostNodes = [];
+  }
+
+  // HUD badge -------------------------------------------------------------
+  let __assistHudRoot = null;
+  let __assistHudTimer = null;
+  function ensureHudRoot() {
+    if (__assistHudRoot && document.body.contains(__assistHudRoot)) return __assistHudRoot;
+    const r = document.createElement('div');
+    r.id = '__assist_hud';
+    Object.assign(r.style, {
+      position: 'fixed', top: '16px', left: '50%', transform: 'translateX(-50%)',
+      zIndex: 2147483647, pointerEvents: 'none', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    });
+    document.documentElement.appendChild(r);
+    __assistHudRoot = r;
+    return r;
+  }
+  function showHudBadge(text, ttlMs) {
+    const root = ensureHudRoot();
+    const badge = document.createElement('div');
+    Object.assign(badge.style, {
+      display: 'inline-block', padding: '6px 10px', borderRadius: '999px',
+      background: 'rgba(31,41,55,0.85)', color: 'white', fontSize: '12px',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.25)', backdropFilter: 'blur(4px)',
+      transition: 'opacity 160ms ease', opacity: '0.98'
+    });
+    badge.textContent = String(text || '');
+    // Clear prior badge quickly
+    try { if (__assistHudTimer) clearTimeout(__assistHudTimer); } catch {}
+    root.innerHTML = '';
+    root.appendChild(badge);
+    __assistHudTimer = setTimeout(() => { try { badge.remove(); } catch {} }, Math.max(300, ttlMs|0));
   }
 
   function getFrameChain(path) {

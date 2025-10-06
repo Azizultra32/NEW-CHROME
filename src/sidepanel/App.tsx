@@ -58,6 +58,9 @@ function AppInner() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [redactedOverlay, setRedactedOverlay] = useState(false);
   const [auditScreenshots, setAuditScreenshots] = useState(false);
+  const [voiceQueriesEnabled, setVoiceQueriesEnabled] = useState(true);
+  const [useRouterVad, setUseRouterVad] = useState(false);
+  const [showCommandHud, setShowCommandHud] = useState(true);
   const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
   const [metrics, setMetrics] = useState<{ verifyFail: number; inserts: number; p50: number; p95: number }>({ verifyFail: 0, inserts: 0, p50: 0, p95: 0 });
   const [showCitations, setShowCitations] = useState(false);
@@ -121,6 +124,36 @@ function AppInner() {
       } catch {}
     })();
   }, []);
+
+  // Load and persist Command HUD preference
+  useEffect(() => {
+    (async () => {
+      try {
+        const bag = await chrome.storage.local.get(['SHOW_COMMAND_HUD','FEAT_VOICE_QUERIES','FEAT_ROUTER_VAD']).catch(() => ({} as any));
+        if (typeof bag?.SHOW_COMMAND_HUD === 'boolean') setShowCommandHud(bag.SHOW_COMMAND_HUD);
+        if (typeof bag?.FEAT_VOICE_QUERIES === 'boolean') setVoiceQueriesEnabled(bag.FEAT_VOICE_QUERIES);
+        if (typeof bag?.FEAT_ROUTER_VAD === 'boolean') setUseRouterVad(bag.FEAT_ROUTER_VAD);
+      } catch {}
+    })();
+  }, []);
+  useEffect(() => {
+    try { chrome.storage.local.set({ SHOW_COMMAND_HUD: showCommandHud }); } catch {}
+  }, [showCommandHud]);
+  useEffect(() => {
+    try { chrome.storage.local.set({ FEAT_VOICE_QUERIES: voiceQueriesEnabled }); } catch {}
+  }, [voiceQueriesEnabled]);
+  useEffect(() => {
+    try {
+      chrome.storage.local.set({ FEAT_ROUTER_VAD: useRouterVad });
+      chrome.runtime.sendMessage({ type: 'SET_VAD_MODE', mode: useRouterVad ? 'router' : 'legacy' }).catch(() => {});
+    } catch {}
+  }, [useRouterVad]);
+
+  async function dispatchCommandWindow(ms: number, label?: string) {
+    const payload: any = { type: 'COMMAND_WINDOW', ms };
+    if (showCommandHud && label) payload.text = label;
+    try { await chrome.runtime.sendMessage(payload); } catch {}
+  }
   const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean; autoBackup: boolean; tplPerHost: boolean }) => {
     try {
       await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview, FEAT_AUTO_BACKUP: next.autoBackup, FEAT_TPL_PER_HOST: next.tplPerHost });
@@ -637,6 +670,7 @@ function AppInner() {
 
   async function handleComposeNote() {
     try {
+      try { await audit('compose_start'); } catch {}
       const encId = encounterIdRef.current || `enc_${Date.now()}`;
       const key = await phiKeyManager.getOrCreateKey(encId);
       const phi = (await loadPHIMap(encId, key)) || {};
@@ -650,11 +684,21 @@ function AppInner() {
         specialty: 'family_medicine',
         apiBase
       });
-      setComposedNote(note);
+      // Normalize backend warnings -> UI flags
+      const flags = Array.isArray((note as any).warnings)
+        ? (note as any).warnings.map((w: any) => ({
+            severity: w.severity === 'critical' ? 'high' : w.severity === 'caution' ? 'medium' : (w.severity || 'low'),
+            text: w.message || w.text || ''
+          }))
+        : (note as any).flags;
+      const normalized = flags ? ({ ...(note as any), flags }) : note;
+      setComposedNote(normalized as any);
       toast.push('Note composed');
+      try { await audit('compose_ok', { flags: (flags||[]).length, sections: Object.keys((note as any).sections||{}).length }); } catch {}
     } catch (e: any) {
       console.warn('[AssistMD] compose failed', e);
       toast.push(`Compose failed: ${e?.message || 'error'}`);
+      try { await audit('compose_err', { message: String(e?.message||e) }); } catch {}
     }
   }
 
@@ -684,6 +728,7 @@ function AppInner() {
       if (!verify.ok) {
         notifyError('Insert verification failed');
         telemetry.recordEvent('insert_verify_fail', { section, selector: result.selector, expectedLength: verify.expectedLength, actualLength: verify.actualLength }).catch(() => {});
+        try { await audit('insert_verify_fail', { section, selector: result.selector, expectedLength: verify.expectedLength, actualLength: verify.actualLength }); } catch {}
         if (auditScreenshots && encounterIdRef.current) {
           try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'verify_fail'); } catch {}
         }
@@ -731,7 +776,7 @@ function AppInner() {
       toast.push(`Insert ${section} via ${result.strategy}`);
     }
     pushWsEvent(`audit: ${section.toLowerCase()} inserted (${result.selector})`);
-    audit('insert_ok', { strategy: result.strategy, section, selector: result.selector });
+    audit('insert_ok', { strategy: result.strategy, section, selector: result.selector, length: payload.length });
     setLastError(null);
     scheduleBackup();
     const latency = Date.now() - t0;
@@ -740,7 +785,7 @@ function AppInner() {
     setBusy(false);
   }
 
-  const COMMAND_COOLDOWN_MS = 1000;
+  const COMMAND_COOLDOWN_MS = 1200;
 
   // Web Speech result path (hybrid fallback) — parses intent and runs command
   async function handleSRResult(event: any) {
@@ -760,7 +805,7 @@ function AppInner() {
     setLiveWords(text);
 
     if ((window as any).speechSynthesis?.speaking) {
-      try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
+      await dispatchCommandWindow(1200, 'Command mode');
       return;
     }
 
@@ -863,6 +908,7 @@ function AppInner() {
       case 'query_vitals': {
         setCommandFeedback('Command: query vitals');
         commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Querying vitals…');
         try {
           const activeTab = await getContentTab();
           if (!activeTab?.id) {
@@ -894,6 +940,7 @@ function AppInner() {
       case 'query_meds': {
         setCommandFeedback('Command: query medications');
         commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Listing medications…');
         try {
           const activeTab = await getContentTab();
           if (!activeTab?.id) {
@@ -924,6 +971,7 @@ function AppInner() {
       case 'query_allergies': {
         setCommandFeedback('Command: query allergies');
         commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Checking allergies…');
         try {
           const activeTab = await getContentTab();
           if (!activeTab?.id) {
@@ -973,7 +1021,14 @@ function AppInner() {
             phiMap: phi,
             apiBase
           });
-          setComposedNote(note);
+          const flags = Array.isArray((note as any).warnings)
+            ? (note as any).warnings.map((w: any) => ({
+                severity: w.severity === 'critical' ? 'high' : w.severity === 'caution' ? 'medium' : (w.severity || 'low'),
+                text: w.message || w.text || ''
+              }))
+            : (note as any).flags;
+          const normalized = flags ? ({ ...(note as any), flags }) : note;
+          setComposedNote(normalized as any);
           setBusy(false);
 
           const sectionCount = Object.keys(note.sections || {}).length;
@@ -1032,7 +1087,7 @@ function AppInner() {
           // Check if TTS is speaking
           if ((window as any).speechSynthesis?.speaking) {
             console.log('[AssistMD] Ignoring result - TTS is speaking');
-            try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
+            await dispatchCommandWindow(1200, 'Composing note…');
             return;
           }
           
@@ -1545,10 +1600,24 @@ function AppInner() {
         }
         // Per-host single field mode
         try {
-          const url = new URL((await getContentTab())?.url || '');
+          const tab = await getContentTab();
+          const url = new URL(tab?.url || '');
           const h = url.hostname;
           const map = (SINGLE_FIELD_MODE && typeof SINGLE_FIELD_MODE === 'object') ? SINGLE_FIELD_MODE as Record<string, boolean> : {};
-          if (h) setSingleFieldMode(!!map[h]);
+          if (h) {
+            let val: boolean;
+            if (Object.prototype.hasOwnProperty.call(map, h)) {
+              val = !!map[h];
+            } else {
+              // Default ON for OSCAR deployments (kai-oscar.com)
+              val = /(^|\.)kai-oscar\.com$/.test(h);
+              if (val) {
+                map[h] = true;
+                try { await chrome.storage.local.set({ SINGLE_FIELD_MODE: map }); } catch {}
+              }
+            }
+            setSingleFieldMode(!!val);
+          }
         } catch {}
         try { await refreshMetrics(); } catch {}
         try { await flushAuditQueue(); } catch {}
@@ -1817,6 +1886,7 @@ ${section.join(' ')}`;
             const msg = `Presign failed (${presign?.status ?? 'n/a'})`;
             setLastError(msg);
             toast.push(msg);
+            try { await audit('record_ws_presign_error', { status: presign?.status }); } catch {}
           }
         } catch {
           transcript.addPartial('[ws] request failed — staying in mock mode');
@@ -1825,6 +1895,7 @@ ${section.join(' ')}`;
           const msg = 'Presign request failed';
           setLastError(msg);
           toast.push(msg);
+          try { await audit('record_ws_presign_error', { status: 'request_failed' }); } catch {}
         }
       } else {
         await chrome.runtime.sendMessage({ type: 'ASR_DISCONNECT' }).catch(() => {});
@@ -1833,6 +1904,7 @@ ${section.join(' ')}`;
         setMode('idle');
         setWsState('disconnected');
         transcript.clear();
+        try { await audit('record_stop'); } catch {}
       }
     } finally {
       setBusy(false);
@@ -2265,6 +2337,15 @@ ${section.join(' ')}`;
                 onClick={() => mapSoapHere()}
               >Map SOAP here</button>
               <button
+                title="Insert Plan now"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => {
+                  const plan = (composedNote && composedNote.sections && (composedNote.sections['Plan'] || composedNote.sections['PLAN'])) || null;
+                  if (plan) await onInsert('PLAN', { payloadOverride: plan });
+                  else await onInsert('PLAN');
+                }}
+              >Insert Plan</button>
+              <button
                 title="Privacy Shield"
                 className={`px-2 py-0.5 text-xs rounded-md border ${redactedOverlay && !auditScreenshots ? 'border-emerald-500 text-emerald-700' : 'border-slate-300'}`}
                 onClick={async () => {
@@ -2404,6 +2485,31 @@ ${section.join(' ')}`;
                         if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on });
                       } catch {}
                     }}
+                  />
+                </label>
+                <div className="text-sm font-medium mt-3">Voice</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Enable voice queries (vitals/meds/allergies)</span>
+                  <input
+                    type="checkbox"
+                    checked={voiceQueriesEnabled}
+                    onChange={(e) => setVoiceQueriesEnabled(!!e.target.checked)}
+                  />
+                </label>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Use AudioWorklet VAD (experimental)</span>
+                  <input
+                    type="checkbox"
+                    checked={useRouterVad}
+                    onChange={(e) => setUseRouterVad(!!e.target.checked)}
+                  />
+                </label>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Show command HUD pill</span>
+                  <input
+                    type="checkbox"
+                    checked={showCommandHud}
+                    onChange={(e) => setShowCommandHud(!!e.target.checked)}
                   />
                 </label>
                 <div className="text-sm font-medium mt-3">PHI Session</div>
@@ -2751,9 +2857,9 @@ ${section.join(' ')}`;
               busy={busy}
               onToggleRecord={onToggleRecord}
               onInsertPlan={() => onInsert('PLAN')}
-              onInsertHPI={features.multi ? (() => onInsert('HPI')) : undefined}
-              onInsertROS={features.multi ? (() => onInsert('ROS')) : undefined}
-              onInsertEXAM={features.multi ? (() => onInsert('EXAM')) : undefined}
+              onInsertHPI={features.multi && !singleFieldMode ? (() => onInsert('HPI')) : undefined}
+              onInsertROS={features.multi && !singleFieldMode ? (() => onInsert('ROS')) : undefined}
+              onInsertEXAM={features.multi && !singleFieldMode ? (() => onInsert('EXAM')) : undefined}
               onUndo={features.undo ? (async () => {
                 const ok = await undoLastInsert();
                 toast.push(ok ? 'Undo applied' : 'Nothing to undo');
@@ -2776,8 +2882,36 @@ ${section.join(' ')}`;
             {composedNote && (
               <div className="mt-3 rounded-lg border border-slate-200 bg-white/90 p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">Composed Note</div>
-                  <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-sm font-medium">Composed Note</div>
+                    {Array.isArray((composedNote as any).flags) && (composedNote as any).flags.length > 0 && (
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full border ${
+                          (composedNote as any).flags.some((f: any) => f.severity === 'high')
+                            ? 'bg-rose-100 text-rose-800 border-rose-200'
+                            : 'bg-amber-100 text-amber-800 border-amber-200'
+                        }`}
+                        title="Safety warnings"
+                      >
+                        ⚠️ {(composedNote as any).flags.length}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-2 py-0.5 text-[11px] rounded-md border border-slate-300 hover:bg-slate-50"
+                      onClick={async () => {
+                        try {
+                          for (const [sec] of Object.entries(composedNote.sections)) {
+                            await insertComposed(sec);
+                          }
+                          toast.push('All sections inserted');
+                        } catch { toast.push('Insert all failed'); }
+                      }}
+                      title="Insert all sections"
+                    >Insert All</button>
+                    <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
+                  </div>
                 </div>
                 
                 {!singleFieldMode && Object.entries(composedNote.sections).map(([sec, txt]) => {
@@ -2819,12 +2953,20 @@ ${section.join(' ')}`;
                     <div key={sec} className="border border-slate-100 rounded-md p-2">
                       <div className="flex items-center justify-between">
                         <div className="text-xs font-semibold">{sec}</div>
-                        <button
-                          className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
-                          onClick={() => insertComposed(sec)}
-                        >
-                          Insert {sec}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <div className="text-[11px] text-slate-500">{String(txt||'').length} chars</div>
+                          <button
+                            className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
+                            onClick={async () => { try { await navigator.clipboard.writeText(String(txt||'')); toast.push(`${sec} copied`); } catch { toast.push('Copy failed'); } }}
+                            title={`Copy ${sec}`}
+                          >Copy</button>
+                          <button
+                            className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
+                            onClick={() => insertComposed(sec)}
+                          >
+                            Insert {sec}
+                          </button>
+                        </div>
                       </div>
                       <div className="mt-1 text-[12px] whitespace-pre-wrap text-slate-700">
                         {renderTextWithTimestamps(String(txt || '').slice(0, 800))}
@@ -2935,3 +3077,4 @@ ${section.join(' ')}`;
     </div>
   );
 }
+        try { await audit('record_start', { mode: 'init' }); } catch {}
