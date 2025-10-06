@@ -148,6 +148,14 @@
   chrome.runtime.onMessage.addListener((m)=>{
     if (!extAlive()) return;
     if (m?.type==='MAP_MODE') toggle(!!m.on, m.section||'PLAN');
+    if (m?.type === 'INLINE_PLAN_OPEN') {
+      try { openInlinePanel(chrome.runtime.getURL('ehr-popup.html')); } catch {}
+      return;
+    }
+    if (m?.type === 'INLINE_PLAN_CLOSE') {
+      closeInlinePanel();
+      return;
+    }
     // Lightweight HUD indicator for short-lived states (e.g., command mode)
     if (m?.type === 'COMMAND_WINDOW') {
       try { showHudBadge(m.text || 'Command mode', m.ms || 1200); } catch {}
@@ -233,6 +241,53 @@
     root.innerHTML = '';
     root.appendChild(badge);
     __assistHudTimer = setTimeout(() => { try { badge.remove(); } catch {} }, Math.max(300, ttlMs|0));
+  }
+
+  // Inline panel (in-tab popup) -------------------------------------------
+  let __assistInlinePanel = null;
+  function closeInlinePanel() {
+    try { if (__assistInlinePanel) { __assistInlinePanel.remove(); } } catch {}
+    __assistInlinePanel = null;
+  }
+  function openInlinePanel(url) {
+    closeInlinePanel();
+    const root = document.createElement('div');
+    __assistInlinePanel = root;
+    Object.assign(root.style, {
+      position: 'fixed', inset: '0', zIndex: 2147483646,
+      background: 'rgba(15,23,42,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+    });
+    const panel = document.createElement('div');
+    Object.assign(panel.style, {
+      width: '680px', height: '520px', maxWidth: '96vw', maxHeight: '86vh',
+      background: '#fff', border: '1px solid #cbd5e1', borderRadius: '12px',
+      boxShadow: '0 20px 60px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column', overflow: 'hidden'
+    });
+    const header = document.createElement('div');
+    header.textContent = 'Plan Editor (Inline)';
+    Object.assign(header.style, {
+      height: '36px', lineHeight: '36px', padding: '0 10px',
+      background: '#0f172a', color: '#fff', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+    });
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    Object.assign(closeBtn.style, {
+      background: 'transparent', color: '#fff', border: 'none', cursor: 'pointer', fontSize: '14px'
+    });
+    closeBtn.addEventListener('click', closeInlinePanel);
+    header.appendChild(closeBtn);
+    const body = document.createElement('div');
+    Object.assign(body.style, { flex: '1 1 auto', background: '#fff' });
+    const iframe = document.createElement('iframe');
+    iframe.src = url;
+    iframe.setAttribute('allow', 'clipboard-write; clipboard-read');
+    Object.assign(iframe.style, { width: '100%', height: '100%', border: '0' });
+    body.appendChild(iframe);
+    panel.appendChild(header);
+    panel.appendChild(body);
+    root.appendChild(panel);
+    root.addEventListener('click', (e) => { if (e.target === root) closeInlinePanel(); });
+    document.documentElement.appendChild(root);
   }
 
   function getFrameChain(path) {

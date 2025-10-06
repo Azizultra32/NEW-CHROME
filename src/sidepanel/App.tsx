@@ -2086,6 +2086,17 @@ ${section.join(' ')}`;
     color: UI.colors.text
   }), [focusMode, opacity]);
 
+  async function openMockEhr() {
+    try {
+      const url = chrome.runtime.getURL('ehr-test.html');
+      await chrome.tabs.create({ url });
+      toast.push('Opened Mock EHR');
+    } catch (e) {
+      console.warn('[AssistMD] openMockEhr failed', e);
+      toast.push('Unable to open Mock EHR');
+    }
+  }
+
   const pairingEnabled = pairingState.enabled;
   const pairingSummary = pairingState.pairs.length
     ? `${pairingState.pairs.length} window${pairingState.pairs.length === 1 ? '' : 's'} paired`
@@ -2345,6 +2356,16 @@ ${section.join(' ')}`;
                   else await onInsert('PLAN');
                 }}
               >Insert Plan</button>
+              <button
+                title="Open the built-in Mock EHR test page"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => openMockEhr()}
+              >Open Mock EHR</button>
+              <button
+                title="Open inline Plan panel (in-tab)"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => { try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'INLINE_PLAN_OPEN' }); } catch {} }}
+              >Inline Plan Panel</button>
               <button
                 title="Privacy Shield"
                 className={`px-2 py-0.5 text-xs rounded-md border ${redactedOverlay && !auditScreenshots ? 'border-emerald-500 text-emerald-700' : 'border-slate-300'}`}
