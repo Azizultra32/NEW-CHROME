@@ -1,23 +1,38 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { CommandStrip } from './components/CommandStrip';
 import { TranscriptList } from './components/TranscriptList';
 import { Controls } from './components/Controls';
 import { ToastProvider, useToast } from './components/Toast';
+import { QuickStartGuide } from './components/QuickStartGuide';
 import { UI } from './lib/ui-tokens';
 import { transcript } from './lib/transcript';
 import { parseIntent } from './intent';
 import { verifyPatientBeforeInsert, confirmPatientFingerprint, GuardStatus } from './lib/guard';
 import { loadProfile, saveProfile, FieldMapping, Section } from './lib/mapping';
-import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert } from './lib/insert';
+import { insertTextInto, insertUsingMapping, verifyTarget, undoLastInsert, getFieldContent, listMatchingSelectors, verifyInsertion } from './lib/insert';
+import { discoverCandidatesForSection } from './lib/fieldDiscovery';
 import * as telemetry from './lib/telemetry';
 import { isDevelopmentBuild } from './lib/env';
-const BASE_COMMAND_MESSAGE = 'Ready for “assist …” commands';
+import { SpeechRecognitionManager, SpeechRecognitionState } from './lib/speechRecognition';
+import { WindowIndicator } from './components/WindowIndicator';
+import { phiKeyManager, storePHIMap, loadPHIMap, PHIMap, deletePHIMap } from './lib/phi-rehydration';
+import { composeNote, ComposedNote, extractSectionText, formatProvenanceTime, getNoteSummary } from './lib/note-composer-client';
+import { captureAndSendScreenshot, flushAuditQueue } from './lib/auditCapture';
+import { tts } from './lib/tts';
+import { wakeWord, RecordingState } from './lib/wakeword';
+import { ChatMessage, ChatLog } from './components/ChatBubble';
+import { commandTagger } from './lib/command-tagger';
+import { scrapeVitals, formatVitals, scrapeMedications, formatMedications, scrapeAllergies, formatAllergies } from './lib/chart-scraper';
+const BASE_COMMAND_MESSAGE = 'Ready for "assist …" commands';
 
 export default function App() {
   return (
     <ToastProvider>
-      <AppInner />
+      <ErrorBoundary>
+        <AppInner />
+      </ErrorBoundary>
     </ToastProvider>
   );
 }
@@ -28,13 +43,41 @@ function AppInner() {
   const [focusMode, setFocusMode] = useState(false);
   const [opacity, setOpacity] = useState(80);
   const [mode, setMode] = useState<'idle' | 'mock' | 'live'>('idle');
+  
+  // Detect if running in iframe mode
+  const isIframeMode = useMemo(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('mode') === 'overlay' || window.parent !== window;
+  }, []);
   const [wsState, setWsState] = useState<'disconnected' | 'connecting' | 'open' | 'error'>('disconnected');
   const [lastError, setLastError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [host, setHost] = useState<string>('');
   const [profile, setProfile] = useState<Record<Section, FieldMapping>>({} as any);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [redactedOverlay, setRedactedOverlay] = useState(false);
+  const [auditScreenshots, setAuditScreenshots] = useState(false);
+  const [voiceQueriesEnabled, setVoiceQueriesEnabled] = useState(true);
+  const [useRouterVad, setUseRouterVad] = useState(false);
+  const [showCommandHud, setShowCommandHud] = useState(true);
+  const [insertModes, setInsertModes] = useState<Record<Section, 'append' | 'replace'>>({ PLAN: 'append', HPI: 'append', ROS: 'append', EXAM: 'append' });
+  const [metrics, setMetrics] = useState<{ verifyFail: number; inserts: number; p50: number; p95: number }>({ verifyFail: 0, inserts: 0, p50: 0, p95: 0 });
+  const [showCitations, setShowCitations] = useState(false);
+  const [singleFieldMode, setSingleFieldMode] = useState(false);
+
+  const refreshMetrics = useCallback(async () => {
+    try {
+      const items: any[] = await (telemetry as any).getRecent?.(200);
+      const fails = items.filter(i => i?.name === 'insert_verify_fail').length;
+      const inserts = items.filter(i => i?.name === 'insert_selector').length;
+      const latencies = items.filter(i => i?.name === 'insert_latency' && typeof i?.data?.ms === 'number').map(i => Number(i.data.ms)).sort((a,b) => a-b);
+      const pct = (arr: number[], q: number) => arr.length ? arr[Math.min(arr.length-1, Math.max(0, Math.floor(q * (arr.length-1))))] : 0;
+      setMetrics({ verifyFail: fails, inserts, p50: pct(latencies, 0.5), p95: pct(latencies, 0.95) });
+    } catch {}
+  }, []);
   const [apiBase, setApiBase] = useState('');
+  const [allowedHosts, setAllowedHosts] = useState<string[]>([]);
   const [wsEvents, setWsEvents] = useState<string[]>([]);
   const [commandLog, setCommandLog] = useState<string[]>([]);
   const [transcriptFormat, setTranscriptFormat] = useState<'RAW' | 'SOAP' | 'APSO'>('RAW');
@@ -45,6 +88,17 @@ function AppInner() {
   const [liveWords, setLiveWords] = useState('');
   const [pttActive, setPttActive] = useState(false);
   const pttActiveRef = useRef(false);
+  const [pairingState, setPairingState] = useState<{ enabled: boolean; pairs: Array<{ host?: string; title?: string; url?: string }> }>({ enabled: false, pairs: [] });
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [windowTrackState, setWindowTrackState] = useState<{ sidepanelWindowId: number | null; lastKnown: { title?: string; url?: string } | null }>({ sidepanelWindowId: null, lastKnown: null });
+  // Auto-pair on allowed hosts (persisted in chrome.storage.local as WINDOW_PAIR_AUTO)
+  const [autoPairOnAllowed, setAutoPairOnAllowed] = useState(false);
+
+  // Chat log for assistant messages
+  const [chatLog, setChatLog] = useState<ChatMessage[]>([]);
+
+  // Wake word state
+  const [wakeWordState, setWakeWordState] = useState<RecordingState>(RecordingState.IDLE);
 
   const defaultTemplates: Record<Section, string> = {
     PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
@@ -70,6 +124,36 @@ function AppInner() {
       } catch {}
     })();
   }, []);
+
+  // Load and persist Command HUD preference
+  useEffect(() => {
+    (async () => {
+      try {
+        const bag = await chrome.storage.local.get(['SHOW_COMMAND_HUD','FEAT_VOICE_QUERIES','FEAT_ROUTER_VAD']).catch(() => ({} as any));
+        if (typeof bag?.SHOW_COMMAND_HUD === 'boolean') setShowCommandHud(bag.SHOW_COMMAND_HUD);
+        if (typeof bag?.FEAT_VOICE_QUERIES === 'boolean') setVoiceQueriesEnabled(bag.FEAT_VOICE_QUERIES);
+        if (typeof bag?.FEAT_ROUTER_VAD === 'boolean') setUseRouterVad(bag.FEAT_ROUTER_VAD);
+      } catch {}
+    })();
+  }, []);
+  useEffect(() => {
+    try { chrome.storage.local.set({ SHOW_COMMAND_HUD: showCommandHud }); } catch {}
+  }, [showCommandHud]);
+  useEffect(() => {
+    try { chrome.storage.local.set({ FEAT_VOICE_QUERIES: voiceQueriesEnabled }); } catch {}
+  }, [voiceQueriesEnabled]);
+  useEffect(() => {
+    try {
+      chrome.storage.local.set({ FEAT_ROUTER_VAD: useRouterVad });
+      chrome.runtime.sendMessage({ type: 'SET_VAD_MODE', mode: useRouterVad ? 'router' : 'legacy' }).catch(() => {});
+    } catch {}
+  }, [useRouterVad]);
+
+  async function dispatchCommandWindow(ms: number, label?: string) {
+    const payload: any = { type: 'COMMAND_WINDOW', ms };
+    if (showCommandHud && label) payload.text = label;
+    try { await chrome.runtime.sendMessage(payload); } catch {}
+  }
   const saveFeatures = useCallback(async (next: { templates: boolean; undo: boolean; multi: boolean; preview: boolean; autoBackup: boolean; tplPerHost: boolean }) => {
     try {
       await chrome.storage.local.set({ FEAT_TEMPLATES: next.templates, FEAT_UNDO: next.undo, FEAT_MULTI: next.multi, FEAT_PREVIEW: next.preview, FEAT_AUTO_BACKUP: next.autoBackup, FEAT_TPL_PER_HOST: next.tplPerHost });
@@ -147,11 +231,93 @@ function AppInner() {
   // Recovery snapshot state
   const [snapshotInfo, setSnapshotInfo] = useState<{ ts: number; keys: string[] } | null>(null);
   const [recoveryBanner, setRecoveryBanner] = useState(false);
+  const [speechRecognitionState, setSpeechRecognitionState] = useState<SpeechRecognitionState>('idle');
+  const speechManagerRef = useRef<SpeechRecognitionManager | null>(null);
 
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { onToggleRef.current = onToggleRecord; }, [onToggleRecord]);
   useEffect(() => { toastRef.current = toast; }, [toast]);
+
+  // Request tabs permission on mount to enable window detection
+  useEffect(() => {
+    (async () => {
+      try {
+        const permissions = chrome.permissions as any;
+        if (permissions?.request) {
+          const hasTabsPermission = await permissions.contains({ permissions: ['tabs'] }).catch(() => false);
+          if (!hasTabsPermission) {
+            await permissions.request({ permissions: ['tabs'] }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to request tabs permission:', e);
+      }
+    })();
+  }, []);
+
+  // Initialize TTS ducking and wake word on mount
+  useEffect(() => {
+    console.log('[App] Initializing TTS and Wake Word');
+
+    // Set up TTS ducking callbacks (pause mic during AI speech)
+    tts.setDuckingCallbacks(
+      () => {
+        // On speak start: pause wake word detector
+        console.log('[App] TTS started - pausing wake word');
+        wakeWord.pause();
+        commandMuteUntilRef.current = Date.now() + 3000; // 3s mute window
+      },
+      () => {
+        // On speak end: resume wake word detector
+        console.log('[App] TTS ended - resuming wake word');
+        wakeWord.resume();
+      }
+    );
+
+    // Set up wake word callbacks
+    wakeWord.setWakeCallback(() => {
+      console.log('[App] Wake word detected - ARMED');
+      speakAndLog('Listening', 'assist');
+      // Tag command audio for suppression
+      commandTagger.markCommandDetected();
+    });
+
+    wakeWord.setStateChangeCallback((state) => {
+      console.log('[App] Wake word state:', state);
+      setWakeWordState(state);
+
+      if (state === RecordingState.ARMED) {
+        setCommandFeedback('🎤 Listening... (say your command)');
+      } else if (state === RecordingState.RECORDING) {
+        setCommandFeedback('🔴 Recording...');
+        // Auto-start recording if not already
+        if (!recordingRef.current && !busyRef.current) {
+          onToggleRef.current?.();
+        }
+      } else if (state === RecordingState.IDLE) {
+        setCommandFeedback(BASE_COMMAND_MESSAGE);
+      }
+    });
+
+    // Start wake word detector
+    wakeWord.start();
+
+    return () => {
+      wakeWord.stop();
+      tts.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (wsState === 'connecting') {
+      setCommandFeedback('Connecting to transcriber…', true);
+    } else if (wsState === 'error') {
+      setCommandFeedback('Transcriber connection lost', true);
+    } else if (wsState === 'open') {
+      setCommandFeedback(BASE_COMMAND_MESSAGE);
+    }
+  }, [wsState]);
 
   // Ensure content script is present in active content tab when panel is open
   // (defined later, after getContentTab)
@@ -164,6 +330,86 @@ function AppInner() {
         try { toast.push('Loaded last transcript'); } catch {}
       }
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const syncStatuses = async () => {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_STATUS' }).catch(() => null);
+        if (mounted && res && typeof res.enabled === 'boolean') {
+          const enabled = res.enabled;
+          const pairs = Array.isArray(res.pairs) ? res.pairs : [];
+          setPairingState({ enabled, pairs });
+          telemetry.recordEvent('window_pair_status', { enabled, pairs: pairs.length, source: 'sync' }).catch(() => {});
+        }
+      } catch {}
+      try {
+        const track = await chrome.runtime.sendMessage({ type: 'WINDOW_TRACK_STATUS' }).catch(() => null);
+        if (mounted && track) {
+          setWindowTrackState({
+            sidepanelWindowId: typeof track.sidepanelWindowId === 'number' ? track.sidepanelWindowId : null,
+            lastKnown: track.lastKnown || null
+          });
+        }
+      } catch {}
+    };
+    syncStatuses();
+
+    const handler = (message: any) => {
+      if (!mounted) return;
+      if (message?.type === 'WINDOW_PAIR_STATUS_EVENT') {
+        const enabled = !!message.enabled;
+        const pairs = Array.isArray(message.pairs) ? message.pairs : [];
+        setPairingState({ enabled, pairs });
+        telemetry.recordEvent('window_pair_status', { enabled, pairs: pairs.length }).catch(() => {});
+      }
+      if (message?.type === 'WINDOW_TRACK_STATUS_EVENT') {
+        setWindowTrackState({
+          sidepanelWindowId: typeof message.sidepanelWindowId === 'number' ? message.sidepanelWindowId : null,
+          lastKnown: message.lastKnown || null
+        });
+      }
+      if (message?.type === 'PHI_MAP_UPDATE' && message.encounterId && message.phiMap) {
+        (async () => {
+          try {
+            const encId = message.encounterId as string;
+            // Keep our encounter id in sync if not set
+            if (!encounterIdRef.current) { encounterIdRef.current = encId; setEncounterId(encId); }
+            const key = await phiKeyManager.getOrCreateKey(encId);
+            await storePHIMap(encId, message.phiMap as PHIMap, key);
+          } catch (e) {
+            console.warn('[AssistMD] PHI_MAP_UPDATE store failed', e);
+          }
+        })();
+      }
+      if (message?.type === 'REQUEST_GHOST_PREVIEW') {
+        (async () => {
+          const sections = computeGhostSections();
+          setGhostPreview(sections);
+          try {
+            const tab = await getContentTab();
+            if (tab?.id) {
+              await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_PREVIEW', sections });
+            }
+          } catch {}
+        })();
+      }
+      if (message?.type === 'REQUEST_EXECUTE_INSERT') {
+        (async () => {
+          const sections = ghostPreview || computeGhostSections();
+          if (sections.PLAN) { await onInsert('PLAN'); }
+          if (sections.HPI)  { await onInsert('HPI'); }
+          if (sections.ROS)  { await onInsert('ROS'); }
+          if (sections.EXAM) { await onInsert('EXAM'); }
+        })();
+      }
+    };
+    chrome.runtime.onMessage.addListener(handler);
+    return () => {
+      mounted = false;
+      chrome.runtime.onMessage.removeListener(handler);
+    };
   }, []);
 
   // Detect recovery snapshot and surface banner if mappings missing
@@ -226,23 +472,88 @@ function AppInner() {
 
   function speak(text: string) {
     try {
-      const utterance = new SpeechSynthesisUtterance(text);
+      // Add to chat log
+      setChatLog(prev => [...prev, {
+        message: text,
+        type: 'assistant',
+        timestamp: new Date()
+      }]);
+
+      // Speak with TTS engine (handles ducking automatically)
+      tts.speak(text).catch(console.error);
+
+      // Legacy mute window for compatibility
       try { commandMuteUntilRef.current = Math.max(commandMuteUntilRef.current, Date.now() + 800); } catch {}
-      utterance.onstart = () => { try { commandMuteUntilRef.current = Date.now() + 1200; } catch {} };
-      utterance.onend = () => { try { commandMuteUntilRef.current = Date.now(); } catch {} };
-      speechSynthesis?.speak(utterance);
     } catch {}
   }
 
-  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string }>(null);
+  function speakAndLog(text: string, userMessage?: string) {
+    if (userMessage) {
+      setChatLog(prev => [...prev, {
+        message: userMessage,
+        type: 'user',
+        timestamp: new Date()
+      }]);
+    }
+    speak(text);
+  }
+
+  const [pendingInsert, setPendingInsert] = useState<null | { section: Section; payload: string; selector: string; bypassGuard?: boolean }>(null);
+  const lastCandidateRef = useRef<null | { section: Section; selector: string; framePath?: number[] }>(null);
+  const [pendingInsertDraft, setPendingInsertDraft] = useState('');
+  const [pendingInsertExisting, setPendingInsertExisting] = useState<string | null>(null);
+  const [pendingInsertLoading, setPendingInsertLoading] = useState(false);
+  const [pendingInsertMeta, setPendingInsertMeta] = useState<null | { selector: string; strict: boolean }>(null);
 
   const [remapPrompt, setRemapPrompt] = useState<null | { section: Section }>(null);
   const [permBanner, setPermBanner] = useState(false);
+  const [targetChooser, setTargetChooser] = useState<null | { section: Section; candidates: { selector: string; framePath?: number[]; confidence?: number }[]; payload: string; bypassGuard?: boolean }>(null);
+  const [targetSelection, setTargetSelection] = useState<number>(0);
+  const [ghostPreview, setGhostPreview] = useState<Partial<Record<Section, string>> | null>(null);
+  const [encounterId, setEncounterId] = useState<string | null>(null);
+  const encounterIdRef = useRef<string | null>(null);
+  const [composedNote, setComposedNote] = useState<ComposedNote | null>(null);
+
+  type InsertOpts = {
+    bypassGuard?: boolean;
+    preferredSelector?: string;
+    payloadOverride?: string;
+    skipTargetPrompt?: boolean;
+    strictSelector?: boolean;
+  };
+
+  useEffect(() => {
+    if (!pendingInsert) {
+      setPendingInsertDraft('');
+      setPendingInsertExisting(null);
+      setPendingInsertLoading(false);
+      setPendingInsertMeta(null);
+      return;
+    }
+    setPendingInsertDraft(pendingInsert.payload);
+    setPendingInsertExisting(null);
+    setPendingInsertLoading(true);
+    (async () => {
+      try {
+        const field = profile?.[pendingInsert.section];
+        if (field) {
+          const snapshot = await getFieldContent(field as any, { preferredSelector: pendingInsert.selector, strict: true });
+          setPendingInsertExisting(snapshot?.content ?? '');
+        } else {
+          setPendingInsertExisting(null);
+        }
+      } catch {
+        setPendingInsertExisting(null);
+      } finally {
+        setPendingInsertLoading(false);
+      }
+    })();
+  }, [pendingInsert, profile]);
 
   // Request on‑demand permissions for scripting/tabs and current origin when needed (defined after getContentTab)
   let ensurePerms: () => Promise<boolean>;
 
-  async function onInsert(section: Section, opts?: { bypassGuard?: boolean }) {
+  async function onInsert(section: Section, opts: InsertOpts = {}) {
     if (!host) { notifyError('No host context for mapping'); return; }
     const field = profile?.[section];
     if (!field?.selector) {
@@ -268,31 +579,213 @@ function AppInner() {
     // Verify target exists and editable
     // Ensure we can execute in the target tab
     await ensurePerms();
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) { const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable'; notifyError(reason); setRemapPrompt({ section }); telemetry.recordEvent('verify_fail', { section, reason }).catch(() => {}); return; }
+    const selectors = Array.from(new Set([field.selector].concat(Array.isArray(field.fallbackSelectors) ? field.fallbackSelectors : []).filter(Boolean)));
+    const availableSelectors = await listMatchingSelectors(field as FieldMapping);
+    const shouldPrompt = !opts.skipTargetPrompt && selectors.length > 1 && availableSelectors.length > 1 && !opts.preferredSelector;
+    if (shouldPrompt) {
+      const options = availableSelectors.length ? availableSelectors : selectors;
+      const cands = options.map((s) => ({ selector: s, confidence: 0.8 }));
+      setTargetChooser({ section, candidates: cands, payload: opts.payloadOverride ?? getTranscriptPayload(), bypassGuard: opts.bypassGuard ?? true });
+      setTargetSelection(0);
+      telemetry.recordEvent('target_prompt_shown', { section, selectors: selectors.length }).catch(() => {});
+      return;
+    }
 
+    const chosen = opts.preferredSelector && selectors.includes(opts.preferredSelector) ? opts.preferredSelector : (availableSelectors[0] || selectors[0]);
+    const strict = opts.strictSelector ?? !!opts.preferredSelector;
+
+    const verify = await verifyTarget(field as any, { preferredSelector: chosen, strict });
+    if (!verify.ok) {
+      const reason = verify.reason === 'missing' ? 'Field not found' : 'Not editable';
+      notifyError(reason);
+      telemetry.recordEvent('verify_fail', { section, reason, selector: chosen }).catch(() => {});
+      // Try semantic discovery and offer suggestions inline
+      try {
+        const suggestions = await discoverCandidatesForSection(section);
+        if (suggestions && suggestions.length) {
+          setTargetChooser({ section, candidates: suggestions.map(s => ({ selector: s.selector, framePath: s.framePath, confidence: s.confidence })), payload: getTranscriptPayload(), bypassGuard: true });
+          setTargetSelection(0);
+          pushWsEvent('discovery: suggested targets (verify failed)');
+          return;
+        }
+      } catch {}
+      // Fallback to explicit remap prompt
+      setRemapPrompt({ section });
+      return;
+    }
+
+    const payload = opts.payloadOverride ?? getTranscriptPayload();
+    if (features.preview && !opts?.bypassGuard) {
+      setPendingInsert({ section, payload, selector: chosen, bypassGuard: opts.bypassGuard });
+      setPendingInsertMeta({ selector: chosen, strict });
+      return;
+    }
+
+    await finalizeInsert(section, field as FieldMapping, payload, { selector: chosen, strict });
+  }
+
+  function getTranscriptPayload() {
     const text = transcript
       .get()
       .filter((x) => !x.text.startsWith('[MOCK]'))
       .map((x) => x.text)
       .join(' ')
       .trim();
-    const payload = text || '(empty)';
-    if (features.preview && !opts?.bypassGuard) {
-      setPendingInsert({ section, payload });
-      return;
-    }
-    const t0 = Date.now();
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Insert ${section} via ${strategy}`);
-    pushWsEvent(`audit: ${section.toLowerCase()} inserted`);
-    audit('insert_ok', { strategy, section });
-    setLastError(null);
-    scheduleBackup();
-    telemetry.recordLatency('insert_latency', Date.now() - t0, { section, strategy }).catch(() => {});
+    return text || '(empty)';
   }
 
-  const COMMAND_COOLDOWN_MS = 1000;
+  function computeGhostSections(): Partial<Record<Section, string>> {
+    // Prefer composed note's Plan if available; otherwise use live transcript payload
+    let planText = getTranscriptPayload();
+    try {
+      if (composedNote && composedNote.sections) {
+        planText = composedNote.sections['Plan'] || composedNote.sections['PLAN'] || planText;
+      }
+    } catch {}
+    const out: Partial<Record<Section, string>> = { PLAN: planText };
+    try {
+      if (features.multi) {
+        // Optional fill for other legacy sections if you want a multi‑section preview
+        // These remain placeholders unless you add explicit mapping from composedNote
+        out.HPI = out.HPI || '';
+        out.ROS = out.ROS || '';
+        out.EXAM = out.EXAM || '';
+      }
+    } catch {}
+    return out;
+  }
+
+  async function sendGhostPreview() {
+    try {
+      const sections = computeGhostSections();
+      setGhostPreview(sections);
+      const tab = await getContentTab();
+      if (tab?.id) {
+        await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_PREVIEW', sections });
+      }
+    } catch {
+      toast.push('Unable to show preview');
+    }
+  }
+
+  async function handleComposeNote() {
+    try {
+      try { await audit('compose_start'); } catch {}
+      const encId = encounterIdRef.current || `enc_${Date.now()}`;
+      const key = await phiKeyManager.getOrCreateKey(encId);
+      const phi = (await loadPHIMap(encId, key)) || {};
+      // Use tokenized transcript (as displayed; backend will rehydrate with phi)
+      const tokenized = getTranscriptPayload();
+      const note = await composeNote({
+        encounterId: encId,
+        transcript: tokenized,
+        phiMap: phi,
+        noteFormat: 'SOAP',
+        specialty: 'family_medicine',
+        apiBase
+      });
+      // Normalize backend warnings -> UI flags
+      const flags = Array.isArray((note as any).warnings)
+        ? (note as any).warnings.map((w: any) => ({
+            severity: w.severity === 'critical' ? 'high' : w.severity === 'caution' ? 'medium' : (w.severity || 'low'),
+            text: w.message || w.text || ''
+          }))
+        : (note as any).flags;
+      const normalized = flags ? ({ ...(note as any), flags }) : note;
+      setComposedNote(normalized as any);
+      toast.push('Note composed');
+      try { await audit('compose_ok', { flags: (flags||[]).length, sections: Object.keys((note as any).sections||{}).length }); } catch {}
+    } catch (e: any) {
+      console.warn('[AssistMD] compose failed', e);
+      toast.push(`Compose failed: ${e?.message || 'error'}`);
+      try { await audit('compose_err', { message: String(e?.message||e) }); } catch {}
+    }
+  }
+
+  async function insertComposed(section: string) {
+    if (!composedNote) return;
+    const text = extractSectionText(composedNote, section) || '';
+    if (!text) { toast.push(`No ${section} section`); return; }
+    // Bypass guard remains false; normal guard applies
+    await onInsert(section as Section, { payloadOverride: text });
+  }
+
+  async function finalizeInsert(section: Section, field: FieldMapping, payload: string, target: { selector: string; strict: boolean }) {
+    // Basic rate limit to avoid duplicate pastes
+    const now = Date.now();
+    if ((busyRef.current)) { notifyError('Insert in progress'); return; }
+    const t0 = now;
+    setBusy(true);
+    const result = await insertUsingMapping(field, payload, { preferredSelector: target.selector, strict: target.strict, mode: insertModes[section] || 'append' });
+    if (!result.ok) {
+      notifyError('Insert failed');
+      telemetry.recordEvent('insert_failed', { section, selector: target.selector }).catch(() => {});
+      setBusy(false); return;
+    }
+    // Verify insertion (no PHI logged: only lengths)
+    try {
+      const verify = await verifyInsertion(field, result.selector, payload);
+      if (!verify.ok) {
+        notifyError('Insert verification failed');
+        telemetry.recordEvent('insert_verify_fail', { section, selector: result.selector, expectedLength: verify.expectedLength, actualLength: verify.actualLength }).catch(() => {});
+        try { await audit('insert_verify_fail', { section, selector: result.selector, expectedLength: verify.expectedLength, actualLength: verify.actualLength }); } catch {}
+        if (auditScreenshots && encounterIdRef.current) {
+          try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'verify_fail'); } catch {}
+        }
+        // Attempt semantic discovery to suggest better targets
+        try {
+          const cands = await discoverCandidatesForSection(section);
+          if (cands && cands.length) {
+            setTargetChooser({ section, candidates: cands.map(c => ({ selector: c.selector, framePath: c.framePath })), payload, bypassGuard: true });
+            setTargetSelection(0);
+            pushWsEvent('discovery: suggested alternative targets');
+          }
+        } catch {}
+      } else {
+        toast.push(`Insert ${section} via ${result.strategy}`);
+        // Offer to save as mapping if this came from a candidate
+        try {
+          const lc = lastCandidateRef.current;
+          if (lc && lc.section === section && lc.selector === target.selector) {
+            const ok = confirm('Save this target as the mapping for this section?');
+            if (ok && host) {
+              const prof = await loadProfile(host);
+              const prev = prof[section];
+              const fallback = Array.from(new Set([...(prev?.fallbackSelectors || []), prev?.selector].filter(Boolean)));
+              prof[section] = {
+                section,
+                selector: lc.selector,
+                strategy: 'value',
+                verified: true,
+                framePath: lc.framePath,
+                target: (lc.framePath && lc.framePath.length) ? 'iframe' : 'page',
+                fallbackSelectors: fallback
+              } as any;
+              await saveProfile(host, prof as any);
+              toast.push('Mapping saved');
+            }
+            lastCandidateRef.current = null;
+          }
+        } catch {}
+        if (auditScreenshots && encounterIdRef.current) {
+          try { await captureAndSendScreenshot(encounterIdRef.current, apiBase, 'post_insert'); } catch {}
+        }
+      }
+    } catch {
+      // Non-fatal; still report success path to user without leaking PHI
+      toast.push(`Insert ${section} via ${result.strategy}`);
+    }
+    pushWsEvent(`audit: ${section.toLowerCase()} inserted (${result.selector})`);
+    audit('insert_ok', { strategy: result.strategy, section, selector: result.selector, length: payload.length });
+    setLastError(null);
+    scheduleBackup();
+    const latency = Date.now() - t0;
+    telemetry.recordLatency('insert_latency', latency, { section, strategy: result.strategy, selector: result.selector }).catch(() => {});
+    telemetry.recordEvent('insert_selector', { section, selector: result.selector, strategy: result.strategy, latency }).catch(() => {});
+    setBusy(false);
+  }
+
+  const COMMAND_COOLDOWN_MS = 1200;
 
   // Web Speech result path (hybrid fallback) — parses intent and runs command
   async function handleSRResult(event: any) {
@@ -304,12 +797,15 @@ function AppInner() {
       .join(' ')
       .trim();
     if (!text) return;
-    console.log('[AssistMD][SR] heard:', text);
+    // Avoid logging raw dictation to console (may contain PHI). Use length-only in development.
+    if (isDevelopmentBuild) {
+      try { console.log('[AssistMD][SR] heard (len):', text.length); } catch {}
+    }
     // Reflect in live word strip too
     setLiveWords(text);
 
     if ((window as any).speechSynthesis?.speaking) {
-      try { await chrome.runtime.sendMessage({ type: 'COMMAND_WINDOW', ms: 800 }); } catch {}
+      await dispatchCommandWindow(1200, 'Command mode');
       return;
     }
 
@@ -396,6 +892,155 @@ function AppInner() {
         if (intent.section === 'ros') await onInsertTemplate('ROS');
         if (intent.section === 'exam') await onInsertTemplate('EXAM');
         break;
+      case 'template_edit': {
+        if (!features.templates) { toastRef.current?.push('Templates disabled'); break; }
+        const section = intent.section.toUpperCase() as Section;
+        setCommandFeedback(`Command: edit template ${intent.section}`);
+        await editTemplate(section);
+        break;
+      }
+      case 'map': {
+        const section = intent.section.toUpperCase() as Section;
+        setCommandFeedback(`Command: map ${intent.section}`);
+        await activateMapMode(section);
+        break;
+      }
+      case 'query_vitals': {
+        setCommandFeedback('Command: query vitals');
+        commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Querying vitals…');
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          // Inject content script if needed
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeVitals
+            }).then(async (results) => {
+              const vitals = results[0]?.result;
+              const response = formatVitals(vitals || {});
+              speakAndLog(response, 'vitals?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping vitals:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_vitals:', error);
+          speak('Error querying vitals');
+        }
+        break;
+      }
+
+      case 'query_meds': {
+        setCommandFeedback('Command: query medications');
+        commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Listing medications…');
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeMedications
+            }).then(async (results) => {
+              const meds = results[0]?.result;
+              const response = formatMedications(meds || []);
+              speakAndLog(response, 'current meds?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping meds:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_meds:', error);
+          speak('Error querying medications');
+        }
+        break;
+      }
+
+      case 'query_allergies': {
+        setCommandFeedback('Command: query allergies');
+        commandTagger.markCommandDetected();
+        await dispatchCommandWindow(1200, 'Checking allergies…');
+        try {
+          const activeTab = await getContentTab();
+          if (!activeTab?.id) {
+            speak('No active tab found');
+            break;
+          }
+
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: scrapeAllergies
+            }).then(async (results) => {
+              const allergies = results[0]?.result;
+              const response = formatAllergies(allergies || []);
+              speakAndLog(response, 'allergies?');
+            });
+          } catch (error) {
+            console.error('[App] Error scraping allergies:', error);
+            speak('Unable to access chart data');
+          }
+        } catch (error) {
+          console.error('[App] Error in query_allergies:', error);
+          speak('Error querying allergies');
+        }
+        break;
+      }
+
+      case 'compose_note': {
+        setCommandFeedback('Command: compose note');
+        commandTagger.markCommandDetected();
+        speak('Composing clinical note');
+
+        try {
+          if (!encounterIdRef.current) {
+            speak('No encounter ID set. Please start a session first.');
+            break;
+          }
+
+          const encId = encounterIdRef.current;
+          const phi = {}; // PHI map handled by backend
+          const tokenized = transcript.get().map(t => t.text).join('\n');
+
+          setBusy(true);
+          const note = await composeNote({
+            encounterId: encId,
+            transcript: tokenized,
+            phiMap: phi,
+            apiBase
+          });
+          const flags = Array.isArray((note as any).warnings)
+            ? (note as any).warnings.map((w: any) => ({
+                severity: w.severity === 'critical' ? 'high' : w.severity === 'caution' ? 'medium' : (w.severity || 'low'),
+                text: w.message || w.text || ''
+              }))
+            : (note as any).flags;
+          const normalized = flags ? ({ ...(note as any), flags }) : note;
+          setComposedNote(normalized as any);
+          setBusy(false);
+
+          const sectionCount = Object.keys(note.sections || {}).length;
+          speak(`Note ready with ${sectionCount} sections. Review before inserting.`);
+        } catch (error) {
+          console.error('[App] Error composing note:', error);
+          setBusy(false);
+          speak('Error composing note. Check the backend connection.');
+        }
+        break;
+      }
+
       case 'undo':
         if (!features.undo) { toastRef.current?.push('Undo disabled'); break; }
         setCommandFeedback('Command: undo');
@@ -417,14 +1062,8 @@ function AppInner() {
   }
 
   async function onInsertTemplate(section: Section) {
-    const field = profile?.[section];
-    if (!host || !field?.selector) { toast.push(`Map ${section} first`); return; }
-    await ensurePerms();
-    const verify = await verifyTarget(field as any);
-    if (!verify.ok) { toast.push('Not editable or missing'); return; }
     const payload = defaultTemplates[section] || '(template)';
-    const strategy = await insertUsingMapping(field as any, payload);
-    toast.push(`Template ${section} via ${strategy}`);
+    await onInsert(section, { payloadOverride: payload });
   }
 
   useEffect(() => () => {
@@ -434,152 +1073,150 @@ function AppInner() {
     }
   }, []);
 
-  // Web Speech supervisor (hybrid): kept paused during dictation; resumes on quiet
+  // Unified Speech Recognition Manager
   useEffect(() => {
-    const SR: any = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!SR) {
-      console.warn('[AssistMD] Web Speech not supported');
-      return;
+    // Only create speech manager if we don't have one
+    if (!speechManagerRef.current) {
+      console.log('[AssistMD] Initializing unified speech recognition');
+      
+      speechManagerRef.current = new SpeechRecognitionManager({
+        onResult: async (transcript) => {
+          // Update live words display
+          setLiveWords(transcript);
+          
+          // Check if TTS is speaking
+          if ((window as any).speechSynthesis?.speaking) {
+            console.log('[AssistMD] Ignoring result - TTS is speaking');
+            await dispatchCommandWindow(1200, 'Composing note…');
+            return;
+          }
+          
+          // Process the result through existing intent handler
+          await handleSRResult({
+            results: [[{ transcript }]],
+            resultIndex: 0
+          });
+        },
+        onStateChange: (state) => {
+          console.log('[AssistMD] Speech recognition state:', state);
+          setSpeechRecognitionState(state);
+        },
+        onError: async (error) => {
+          if ((window as any).__ASSIST_DEBUG) console.error('[AssistMD] Speech recognition error:', error);
+          // Permission denied: try to nudge permission once, then retry
+          if (error === 'Microphone permission denied') {
+            try {
+              await navigator.mediaDevices.getUserMedia({ audio: true });
+              setTimeout(() => { try { speechManagerRef.current?.start(); } catch {} }, 300);
+              toast.push('Mic permission granted. Resuming voice.');
+              return;
+            } catch {
+              toast.push('Voice error: Microphone permission denied');
+              return;
+            }
+          }
+          // Minor errors: let SR manager auto-retry silently
+        },
+        continuous: true,
+        interimResults: false
+      });
     }
 
-    let rec: any = null;
-    let live = false;
-    let killed = false;
-    let wantOn = true;
-    console.log('[AssistMD] SR supervisor starting');
-    let restartTimer: any = null;
-    let cooldownUntil = 0;
-    const RESTART_MS = 600;
-
-    const startSR = () => {
-      console.log('[AssistMD] startSR called', { killed, live, wantOn, cooldown: Date.now() < cooldownUntil });
-      if (killed || live || !wantOn) return;
-      if (Date.now() < cooldownUntil) return;
-      try {
-        rec = new SR();
-        rec.lang = 'en-US';
-        rec.continuous = true;
-        rec.interimResults = false;
-        rec.onresult = handleSRResult;
-        rec.onerror = (e: any) => {
-          const err = e?.error || e;
-          const benign = err === 'no-speech' || err === 'aborted' || err === 'network';
-          if (!benign) console.warn('[AssistMD] SpeechRecognition error', err);
-          cooldownUntil = Date.now() + 800;
-        };
-        rec.onend = () => {
-          live = false;
-          if (killed) return;
-          if (wantOn) {
-            clearTimeout(restartTimer);
-            restartTimer = setTimeout(startSR, RESTART_MS);
-          }
-        };
-
-        rec.start();
-        live = true;
-        console.log('[AssistMD] SR started successfully');
-      } catch (err) {
-        console.error('[AssistMD] SR start failed:', err);
-        live = false;
-        cooldownUntil = Date.now() + 800;
-        clearTimeout(restartTimer);
-        restartTimer = setTimeout(startSR, RESTART_MS);
-      }
-    };
-
-    const stopSR = () => {
-      wantOn = false;
-      clearTimeout(restartTimer);
-      if (live && rec) {
-        try { rec.stop(); } catch {}
-      }
-      live = false;
-    };
-
-    const speakGuard = setInterval(() => {
-      const talking = (window as any).speechSynthesis?.speaking;
-      if (talking) {
-        if (live && rec) {
-          try { rec.stop(); } catch {}
-        }
-        live = false;
-      } else if (wantOn && !live) {
-        startSR();
+    // Handle TTS speaking - pause recognition during speech synthesis
+    const ttsMonitor = setInterval(() => {
+      if (!speechManagerRef.current) return;
+      
+      const speaking = (window as any).speechSynthesis?.speaking;
+      if (speaking && speechManagerRef.current.isListening()) {
+        console.log('[AssistMD] Pausing for TTS');
+        speechManagerRef.current.pause();
+      } else if (!speaking && speechManagerRef.current.getState() === 'paused') {
+        console.log('[AssistMD] Resuming after TTS');
+        speechManagerRef.current.resume();
       }
     }, 200);
 
-    const onMsg = (m: any) => {
-      if (m?.type === 'ASR_VAD') {
-        if (m.state === 'speaking') {
-          // Stop SR during dictation to avoid interference
-          wantOn = false;
-          if (live && rec) {
-            try { rec.stop(); } catch {}
-          }
-          live = false;
-        } else if (m.state === 'quiet') {
-          // Resume SR when dictation stops
-          wantOn = true;
-          startSR();
+    // Cleanup function
+    return () => {
+      clearInterval(ttsMonitor);
+      if (speechManagerRef.current) {
+        console.log('[AssistMD] Cleaning up speech recognition');
+        speechManagerRef.current.destroy();
+        speechManagerRef.current = null;
+      }
+    };
+  }, [toast]);
+
+  // Handle ASR_VAD messages (pause during dictation)
+  useEffect(() => {
+    const handleMessage = (message: any) => {
+      if (!speechManagerRef.current) return;
+      
+      if (message?.type === 'ASR_VAD') {
+        if (message.state === 'speaking') {
+          // Pause recognition during dictation
+          console.log('[AssistMD] Pausing recognition - dictation active');
+          speechManagerRef.current.pause();
+        } else if (message.state === 'quiet') {
+          // Resume recognition when dictation stops
+          console.log('[AssistMD] Resuming recognition - dictation stopped');
+          speechManagerRef.current.resume();
         }
       }
+      if (message?.type === 'ASR_WS_STATE') {
+        telemetry.recordEvent('ws_state_change', { state: message.state }).catch(() => {});
+      }
     };
-    chrome.runtime.onMessage.addListener(onMsg);
 
-    const kick = () => {
-      wantOn = true;
-      startSR();
-    };
-    
-    // Chrome requires user gesture for speech recognition
-    // Try multiple strategies to start as soon as possible
-    
-    // Strategy 1: Start when panel opens (may work in side panel context)
-    wantOn = true;
-    startSR();
-    
-    // Strategy 2: Start after any Chrome API interaction
-    chrome.runtime.sendMessage({ type: 'PING' }).then(() => {
-      if (!live) {
-        console.log('[AssistMD] Starting SR after API interaction');
-        wantOn = true;
-        startSR();
-      }
-    }).catch(() => {});
-    
-    // Strategy 3: Auto-start when recording begins
-    const watchRecording = setInterval(() => {
-      if (recordingRef.current && !live) {
-        console.log('[AssistMD] Auto-starting SR with recording');
-        wantOn = true;
-        startSR();
-        clearInterval(watchRecording);
-      }
-    }, 100);
-    setTimeout(() => clearInterval(watchRecording), 5000); // Give up after 5s
-    
-    // Keep the user gesture fallbacks
-    window.addEventListener('pointerdown', kick, { once: true });
-    window.addEventListener('keydown', kick, { once: true });
-    const idle = setTimeout(() => { 
-      if (!live) {
-        console.log('[AssistMD] Attempting idle SR start');
-        wantOn = true; 
-        startSR(); 
-      }
-    }, 800);
-
+    chrome.runtime.onMessage.addListener(handleMessage);
     return () => {
-      killed = true;
-      clearTimeout(idle);
-      clearInterval(speakGuard);
-      chrome.runtime.onMessage.removeListener(onMsg);
-      window.removeEventListener('pointerdown', kick);
-      window.removeEventListener('keydown', kick);
-      stopSR();
+      chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
+
+  // Start speech recognition on user interaction or when recording starts
+  useEffect(() => {
+    const startRecognition = () => {
+      if (speechManagerRef.current && speechRecognitionState === 'idle') {
+        console.log('[AssistMD] Starting speech recognition');
+        speechManagerRef.current.start();
+      }
+    };
+
+    // Try to start immediately (may work in side panel)
+    const startTimer = setTimeout(() => {
+      startRecognition();
+    }, 100);
+
+    // Start when recording begins
+    if (recording && speechManagerRef.current && speechRecognitionState === 'idle') {
+      startRecognition();
+    }
+
+    // Strategy 2: Start after Chrome API interaction
+    chrome.runtime.sendMessage({ type: 'PING' }).then(() => {
+      startRecognition();
+    }).catch(() => {});
+
+    // Fallback: start on first interaction
+    const interactionHandler = () => {
+      startRecognition();
+      document.removeEventListener('click', interactionHandler);
+      document.removeEventListener('keydown', interactionHandler);
+      window.removeEventListener('focus', interactionHandler);
+    };
+    
+    document.addEventListener('click', interactionHandler, { once: true });
+    document.addEventListener('keydown', interactionHandler, { once: true });
+    window.addEventListener('focus', interactionHandler, { once: true });
+
+    return () => {
+      clearTimeout(startTimer);
+      document.removeEventListener('click', interactionHandler);
+      document.removeEventListener('keydown', interactionHandler);
+      window.removeEventListener('focus', interactionHandler);
+    };
+  }, [speechRecognitionState, recording]);
 
   const getContentTab = useCallback(async () => {
     const tabs = await chrome.tabs.query({ lastFocusedWindow: true });
@@ -605,17 +1242,30 @@ function AppInner() {
       const url = tab?.url || '';
       if (!url) return true;
       const origin = (() => { try { return new URL(url).origin + '/*'; } catch { return ''; } })();
+      // Enforce host allowlist first
+      if (host && allowedHosts && allowedHosts.length && !allowedHosts.includes(host)) {
+        setPermBanner(true);
+        notifyError('Host not allowed. Add it in Settings to enable mapping/insert.');
+        telemetry.recordEvent('permission_host_blocked', { host, origin }).catch(() => {});
+        return false;
+      }
       const contains = (chrome.permissions as any).contains?.bind(chrome.permissions) || (async () => false);
       const request = (chrome.permissions as any).request?.bind(chrome.permissions) || (async () => false);
       const has = await contains({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
-      if (has) return true;
+      if (has) {
+        await ensureContentScript?.();
+        return true;
+      }
       const ok = await request({ permissions: ['scripting', 'tabs'], origins: origin ? [origin] : [] as any }).catch(() => false);
       if (!ok) {
         notifyError('Permissions denied. Enable permissions to map/insert.');
         setPermBanner(true);
+        telemetry.recordEvent('permission_denied', { origin, host }).catch(() => {});
         return false;
       }
       setPermBanner(false);
+      telemetry.recordEvent('permission_granted', { origin, host }).catch(() => {});
+      await ensureContentScript?.();
       return true;
     } catch {
       return true;
@@ -626,14 +1276,64 @@ function AppInner() {
   ensureContentScript = async () => {
     try {
       const tab = await getContentTab();
-      if (tab?.id) {
-        try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
-        catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
+      if (!tab?.id || !tab.url) return;
+
+      let origin = '';
+      let hostname = '';
+      try {
+        const parsed = new URL(tab.url);
+        origin = `${parsed.origin}/*`;
+        hostname = parsed.hostname;
+      } catch {}
+
+      const allowlist = Array.isArray(allowedHosts) ? allowedHosts : [];
+      if (hostname && allowlist.length && !allowlist.includes(hostname)) {
+        return;
       }
+
+      if (origin) {
+        const contains = (chrome.permissions as any).contains?.bind(chrome.permissions);
+        if (typeof contains === 'function') {
+          const has = await contains({ permissions: ['scripting', 'tabs'], origins: [origin] }).catch(() => false);
+          if (!has) return;
+        }
+      }
+
+      try { await chrome.tabs.sendMessage(tab.id, { type: 'PING' }); }
+      catch { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); }
     } catch {}
   };
 
-  useEffect(() => { ensureContentScript?.(); }, [getContentTab]);
+  useEffect(() => { ensureContentScript?.(); }, [getContentTab, allowedHosts]);
+  useEffect(() => { refreshMetrics().catch(() => {}); }, [recording, wsState]);
+  // Keyboard navigation for Target Chooser
+  useEffect(() => {
+    if (!targetChooser) return;
+    const onKey = async (e: KeyboardEvent) => {
+      try {
+        if (e.key === 'ArrowDown') { e.preventDefault(); setTargetSelection((i) => Math.min(i + 1, (targetChooser?.candidates.length || 1) - 1)); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); setTargetSelection((i) => Math.max(i - 1, 0)); }
+        else if (e.key === 'Enter') {
+          e.preventDefault();
+          const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
+          setTargetChooser(null);
+          setTargetSelection(0);
+          const temp: FieldMapping = {
+            section: targetChooser.section,
+            selector: cand.selector,
+            strategy: 'value',
+            verified: false,
+            framePath: cand.framePath,
+            target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+          } as any;
+          lastCandidateRef.current = { section: targetChooser.section, selector: cand.selector, framePath: cand.framePath };
+          await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
+        }
+      } catch {}
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [targetChooser, targetSelection]);
 
   // Capture active tab host & load mapping profile
   useEffect(() => {
@@ -669,6 +1369,54 @@ function AppInner() {
       toast.push('Failed to save API base');
     }
   }, [apiBase, toast]);
+
+  const addCurrentHostToAllowlist = useCallback(async () => {
+    if (!host) { toast.push('No active host'); return; }
+    const next = Array.from(new Set([...(allowedHosts || []), host])).sort();
+    try {
+      await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+      setAllowedHosts(next);
+      toast.push(`Allowed ${host}`);
+    } catch { toast.push('Failed to update allowlist'); }
+  }, [host, allowedHosts, toast]);
+
+  const removeHostFromAllowlist = useCallback(async (h: string) => {
+    const next = (allowedHosts || []).filter((x) => x !== h);
+    try {
+      await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+      setAllowedHosts(next);
+      toast.push(`Removed ${h}`);
+    } catch { toast.push('Failed to update allowlist'); }
+  }, [allowedHosts, toast]);
+
+  const onTogglePairing = useCallback(async (next: boolean) => {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'WINDOW_PAIR_SET', enabled: next }).catch(() => null);
+      if (!res) throw new Error('no-response');
+      if (res?.ok === false) throw new Error(res.error || 'request failed');
+      const enabled = typeof res.enabled === 'boolean' ? res.enabled : next;
+      setPairingState((prev) => ({ ...prev, enabled }));
+      telemetry.recordEvent('window_pair_toggle', { enabled }).catch(() => {});
+      toast.push(enabled ? 'Window pairing enabled' : 'Window pairing disabled');
+    } catch {
+      toast.push('Pairing toggle failed');
+    } finally {
+      setPairingBusy(false);
+    }
+  }, [pairingBusy, toast]);
+
+  const onTestMappings = useCallback(async () => {
+    if (!host) { toast.push('No host detected'); return; }
+    const sections: Section[] = ['PLAN','HPI','ROS','EXAM'];
+    for (const s of sections) {
+      const field = profile?.[s];
+      if (!field?.selector) continue;
+      const res = await verifyTarget(field as any);
+      toast.push(`${s}: ${res.ok ? 'OK' : res.reason === 'missing' ? 'Missing' : 'Not editable'}`);
+    }
+  }, [host, profile, toast]);
 
   const onBackupAll = useCallback(async () => {
     try {
@@ -707,6 +1455,122 @@ function AppInner() {
     }
   }, [toast]);
 
+  // Quick action: pair to the current tab (grant perms, allowlist host, enable pairing)
+  const pairToThisTab = useCallback(async () => {
+    try {
+      const tab = await getContentTab();
+      if (!tab?.url) { toast.push('No active tab'); return; }
+      // Ensure we can inject on this origin
+      const ok = await ensurePerms();
+      if (!ok) { toast.push('Permission denied for this site'); return; }
+      // Add to allowlist if not present
+      try {
+        const u = new URL(tab.url);
+        const h = u.hostname;
+        if (h) {
+          const next = Array.from(new Set([...(allowedHosts || []), h])).sort();
+          await chrome.storage.local.set({ ALLOWED_HOSTS: next });
+          setAllowedHosts(next);
+        }
+      } catch {}
+      // Turn on pairing
+      await onTogglePairing(true);
+      toast.push('Paired to this tab');
+    } catch {
+      toast.push('Pairing failed');
+    }
+  }, [allowedHosts, ensurePerms, getContentTab, onTogglePairing, toast]);
+
+  // Move activateMapMode here (before mapSoapHere that uses it)
+  const activateMapMode = useCallback(async (section: Section) => {
+    const activeTab = await getContentTab();
+    if (!activeTab?.id) {
+      toast.push('No active tab');
+      return false;
+    }
+    try {
+      await ensurePerms();
+      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
+    } catch (primaryErr) {
+      console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
+      try {
+        await ensurePerms();
+        await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] });
+        await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section });
+      } catch (fallbackErr) {
+        console.error('MAP_MODE fallback failed', fallbackErr);
+        toast.push('Unable to enter map mode — reload the EHR tab and try again.');
+        return false;
+      }
+    }
+    toast.push(`Click a ${section} field to map`);
+    return true;
+  }, [toast, getContentTab, ensurePerms]);
+
+  // Quick action: start mapping PLAN (SOAP) in the current tab
+  const mapSoapHere = useCallback(async () => {
+    try {
+      const ok = await activateMapMode('PLAN');
+      if (!ok) return;
+    } catch {
+      toast.push('Unable to start mapping');
+    }
+  }, [activateMapMode, toast]);
+
+  // First‑time inline tip under header (persist dismiss)
+  const [tipOpen, setTipOpen] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { TIP_SEEN } = await chrome.storage.local.get(['TIP_SEEN']);
+        setTipOpen(!TIP_SEEN);
+      } catch {
+        setTipOpen(true);
+      }
+    })();
+  }, []);
+  const dismissTip = useCallback(async () => {
+    setTipOpen(false);
+    try { await chrome.storage.local.set({ TIP_SEEN: true }); } catch {}
+  }, []);
+
+  const onSelfTestPresign = useCallback(async () => {
+    try {
+      const encId = crypto.randomUUID();
+      const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
+      if (presign?.ok && presign.wssUrl) {
+        toast.push('Presign OK');
+        pushWsEvent('selftest: presign ok');
+      } else {
+        toast.push(`Presign failed (${presign?.status ?? 'n/a'})`);
+        pushWsEvent('selftest: presign failed');
+      }
+    } catch (e) {
+      toast.push('Presign request error');
+    }
+  }, [toast]);
+
+  const onSelfTestWS = useCallback(async () => {
+    try {
+      setBusy(true);
+      const encId = crypto.randomUUID();
+      const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
+      if (!(presign?.ok && presign.wssUrl)) { toast.push('WS test: presign failed'); return; }
+      await chrome.runtime.sendMessage({ type: 'START_CAPTURE' }).catch(() => {});
+      await chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: presign.wssUrl }).catch(() => {});
+      toast.push('WS test: connected (2s)');
+      setTimeout(async () => {
+        await chrome.runtime.sendMessage({ type: 'ASR_DISCONNECT' }).catch(() => {});
+        await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }).catch(() => {});
+        toast.push('WS test: disconnected');
+      }, 2000);
+    } catch {
+      toast.push('WS test error');
+    } finally {
+      setBusy(false);
+    }
+  }, [toast]);
+
   // Load API base on mount
   useEffect(() => {
     (async () => {
@@ -716,6 +1580,64 @@ function AppInner() {
       } catch {}
     })();
   }, []);
+
+  // Load allowed hosts (permissions allowlist)
+  useEffect(() => {
+    (async () => {
+      try {
+        const { ALLOWED_HOSTS, WINDOW_PAIR_AUTO, OVERLAY_REDACTED, AUDIT_SCREENSHOT_ENABLED, INSERT_MODES, SINGLE_FIELD_MODE } = await chrome.storage.local.get(['ALLOWED_HOSTS','WINDOW_PAIR_AUTO','OVERLAY_REDACTED','AUDIT_SCREENSHOT_ENABLED','INSERT_MODES','SINGLE_FIELD_MODE']);
+        if (Array.isArray(ALLOWED_HOSTS)) setAllowedHosts(ALLOWED_HOSTS as string[]);
+        setAutoPairOnAllowed(!!WINDOW_PAIR_AUTO);
+        const val = !!OVERLAY_REDACTED;
+        setRedactedOverlay(val);
+        try {
+          const tab = await getContentTab();
+          if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: val });
+        } catch {}
+        setAuditScreenshots(!!AUDIT_SCREENSHOT_ENABLED);
+        if (INSERT_MODES && typeof INSERT_MODES === 'object') {
+          setInsertModes((prev) => ({ ...prev, ...(INSERT_MODES as any) }));
+        }
+        // Per-host single field mode
+        try {
+          const tab = await getContentTab();
+          const url = new URL(tab?.url || '');
+          const h = url.hostname;
+          const map = (SINGLE_FIELD_MODE && typeof SINGLE_FIELD_MODE === 'object') ? SINGLE_FIELD_MODE as Record<string, boolean> : {};
+          if (h) {
+            let val: boolean;
+            if (Object.prototype.hasOwnProperty.call(map, h)) {
+              val = !!map[h];
+            } else {
+              // Default ON for OSCAR deployments (kai-oscar.com)
+              val = /(^|\.)kai-oscar\.com$/.test(h);
+              if (val) {
+                map[h] = true;
+                try { await chrome.storage.local.set({ SINGLE_FIELD_MODE: map }); } catch {}
+              }
+            }
+            setSingleFieldMode(!!val);
+          }
+        } catch {}
+        try { await refreshMetrics(); } catch {}
+        try { await flushAuditQueue(); } catch {}
+      } catch {}
+    })();
+  }, []);
+
+  const onToggleSingleFieldMode = useCallback(async (next: boolean) => {
+    try {
+      const bag = await chrome.storage.local.get(['SINGLE_FIELD_MODE']);
+      const map = (bag.SINGLE_FIELD_MODE && typeof bag.SINGLE_FIELD_MODE === 'object') ? bag.SINGLE_FIELD_MODE as Record<string, boolean> : {};
+      if (!host) return;
+      map[host] = next;
+      await chrome.storage.local.set({ SINGLE_FIELD_MODE: map });
+      setSingleFieldMode(next);
+      toast.push(next ? 'Single note field mode enabled' : 'Single note field mode disabled');
+    } catch {
+      toast.push('Failed to update setting');
+    }
+  }, [host, toast]);
 
   // Mapping export/import (per hostname)
   const onExportMappings = useCallback(async () => {
@@ -798,44 +1720,33 @@ function AppInner() {
     };
   }, []);
 
+  // activateMapMode moved earlier (before mapSoapHere) - removed duplicate
+
   const onMapFields = useCallback(async () => {
-    const activeTab = await getContentTab();
-    if (!activeTab?.id) {
-      toast.push('No active tab');
-      return;
-    }
+    const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
+    const section = (String(choice || 'PLAN').toUpperCase() as Section);
+    const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
+    const pick = valid ? section : 'PLAN';
+    await activateMapMode(pick);
+  }, [activateMapMode]);
 
+  const editTemplate = useCallback(async (section: Section) => {
+    const cur = defaultTemplates[section];
+    const next = window.prompt(`Edit ${section} template`, cur);
+    if (next === null) return false;
     try {
-      await ensurePerms();
-      // Prompt for section to map (quick, non-blocking UI)
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
-      return;
-    } catch (primaryErr) {
-      console.warn('MAP_MODE initial send failed, attempting injection', primaryErr);
+      const key = (features.tplPerHost && host) ? `TPL_${host}_${section}` : `TPL_${section}`;
+      await chrome.storage.local.set({ [key]: next });
+      (defaultTemplates as any)[section] = next;
+      toast.push(`${section} template saved`);
+      scheduleBackup();
+      telemetry.recordEvent('template_saved', { section, host: features.tplPerHost ? host || '(global)' : 'global' }).catch(() => {});
+      return true;
+    } catch {
+      toast.push('Template save failed');
+      return false;
     }
-
-    try {
-      await ensurePerms();
-      await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        files: ['content.js']
-      });
-      const choice = window.prompt('Map which section? (PLAN, HPI, ROS, EXAM)', 'PLAN');
-      const section = (String(choice || 'PLAN').toUpperCase() as Section);
-      const valid = section === 'PLAN' || section === 'HPI' || section === 'ROS' || section === 'EXAM';
-      const pick = valid ? section : 'PLAN';
-      await chrome.tabs.sendMessage(activeTab.id, { type: 'MAP_MODE', on: true, section: pick });
-      toast.push(`Click a ${pick} field to map`);
-    } catch (fallbackErr) {
-      console.error('MAP_MODE fallback failed', fallbackErr);
-      toast.push('Unable to enter map mode — reload the EHR tab and try again.');
-    }
-  }, [toast, getContentTab]);
+  }, [features.tplPerHost, host, toast, scheduleBackup]);
 
   const formatTranscript = useCallback(() => {
     const items = transcript
@@ -963,6 +1874,8 @@ ${section.join(' ')}`;
 
         try {
           const encId = crypto.randomUUID();
+          encounterIdRef.current = encId;
+          setEncounterId(encId);
           const presign = await chrome.runtime.sendMessage({ type: 'PRESIGN_WS', encounterId: encId });
           if (presign?.ok && presign.wssUrl) {
             await chrome.runtime.sendMessage({ type: 'ASR_CONNECT', wssUrl: presign.wssUrl });
@@ -973,6 +1886,7 @@ ${section.join(' ')}`;
             const msg = `Presign failed (${presign?.status ?? 'n/a'})`;
             setLastError(msg);
             toast.push(msg);
+            try { await audit('record_ws_presign_error', { status: presign?.status }); } catch {}
           }
         } catch {
           transcript.addPartial('[ws] request failed — staying in mock mode');
@@ -981,6 +1895,7 @@ ${section.join(' ')}`;
           const msg = 'Presign request failed';
           setLastError(msg);
           toast.push(msg);
+          try { await audit('record_ws_presign_error', { status: 'request_failed' }); } catch {}
         }
       } else {
         await chrome.runtime.sendMessage({ type: 'ASR_DISCONNECT' }).catch(() => {});
@@ -989,6 +1904,7 @@ ${section.join(' ')}`;
         setMode('idle');
         setWsState('disconnected');
         transcript.clear();
+        try { await audit('record_stop'); } catch {}
       }
     } finally {
       setBusy(false);
@@ -997,7 +1913,7 @@ ${section.join(' ')}`;
 
   // Listen for status + data from background/offscreen
   useEffect(() => {
-    const handler = (m: any) => {
+    const handler = async (m: any) => {
       if (m?.type === 'OFFSCREEN_STATUS') {
         pushWsEvent(`status: ${m.status}${m.code ? ` (${m.code})` : ''}`);
         if (m.status === 'running') {
@@ -1017,6 +1933,21 @@ ${section.join(' ')}`;
           setWsState('disconnected');
           setMode('idle');
           transcript.clear();
+          // Purge encounter keys and PHI map on stop
+          try {
+            const encId = encounterIdRef.current;
+            if (encId) {
+              try { await deletePHIMap(encId); } catch {}
+              try { phiKeyManager.deleteKey(encId); } catch {}
+              encounterIdRef.current = null;
+              setEncounterId(null);
+            }
+          } catch {}
+          // Recreate speech recognition manager on stop to avoid invalid state
+          if (speechManagerRef.current) {
+            try { speechManagerRef.current.destroy(); } catch {}
+            speechManagerRef.current = null;
+          }
         }
         if (m.status === 'error') {
           setRecording(false);
@@ -1147,13 +2078,29 @@ ${section.join(' ')}`;
 
   const panelStyle = useMemo(() => ({
     minHeight: '100vh',
-    width: UI.panel.width + 'px',
+    width: '100%',
     maxWidth: UI.panel.width + 'px',
     borderRadius: UI.panel.radius,
     backdropFilter: 'blur(14px)',
     background: focusMode ? UI.colors.panelBgFocus : `rgba(255,255,255,${opacity / 100})`,
     color: UI.colors.text
   }), [focusMode, opacity]);
+
+  async function openMockEhr() {
+    try {
+      const url = chrome.runtime.getURL('ehr-test.html');
+      await chrome.tabs.create({ url });
+      toast.push('Opened Mock EHR');
+    } catch (e) {
+      console.warn('[AssistMD] openMockEhr failed', e);
+      toast.push('Unable to open Mock EHR');
+    }
+  }
+
+  const pairingEnabled = pairingState.enabled;
+  const pairingSummary = pairingState.pairs.length
+    ? `${pairingState.pairs.length} window${pairingState.pairs.length === 1 ? '' : 's'} paired`
+    : pairingState.enabled ? 'Waiting for eligible host window' : 'No active pairs yet';
 
   const wsMonitor = isDevelopmentBuild && (
     <div className="text-[11px] text-slate-500 space-y-1">
@@ -1162,8 +2109,8 @@ ${section.join(' ')}`;
   );
 
   return (
-    <div className="relative">
-      {permBanner && (
+    <div className={`relative ${isIframeMode ? 'iframe-mode' : ''}`}>
+      {permBanner && !isIframeMode && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 px-3 py-2 text-sm flex items-center justify-between">
           <div>
             <span className="font-medium">Permissions needed</span>
@@ -1175,7 +2122,7 @@ ${section.join(' ')}`;
           </div>
         </div>
       )}
-      {recoveryBanner && snapshotInfo && (
+      {recoveryBanner && snapshotInfo && !isIframeMode && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900 px-3 py-2 text-sm flex items-center justify-between">
           <div>
             <span className="font-medium">Recovery snapshot found</span>
@@ -1215,19 +2162,117 @@ ${section.join(' ')}`;
           </div>
         </div>
       )}
-      {pendingInsert && (
+      {targetChooser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/30" />
-          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-3 space-y-2">
-            <div className="text-sm font-medium">Confirm insert → {pendingInsert.section}</div>
-            <div className="max-h-40 overflow-auto text-[12px] whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-2">
-              {pendingInsert.payload.slice(0, 1200)}
-              {pendingInsert.payload.length > 1200 ? '…' : ''}
+          <div className="relative z-10 w-[420px] max-w-[90vw] rounded-lg border border-slate-200 bg-white shadow-xl p-4 space-y-3">
+            <div className="text-sm font-medium">Select target → {targetChooser.section}</div>
+            <div className="text-[12px] text-slate-600">Choose which mapped selector should receive this insert.</div>
+            <div className="max-h-40 overflow-auto space-y-2">
+              {targetChooser.candidates.map((cand, idx) => (
+                <div key={`${cand.selector}-${(cand.framePath||[]).join('.')}`}
+                     className="flex items-center justify-between gap-2 text-[12px] text-slate-700">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="assist-target-choice"
+                      value={idx}
+                      checked={targetSelection === idx}
+                      onChange={() => setTargetSelection(idx)}
+                    />
+                    <span className="font-mono break-all">
+                      {cand.selector}
+                      {cand.framePath && cand.framePath.length ? `  (iframe ${cand.framePath.join('>')})` : ''}
+                      {typeof (cand as any).confidence === 'number' ? `  (${Math.round((cand as any).confidence * 100)}%)` : ''}
+                    </span>
+                  </label>
+                  <button
+                    className="px-1.5 py-0.5 rounded border border-slate-300"
+                    onClick={async () => {
+                      try {
+                        const temp: FieldMapping = {
+                          section: targetChooser.section,
+                          selector: cand.selector,
+                          strategy: 'value',
+                          verified: false,
+                          framePath: cand.framePath,
+                          target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+                        } as any;
+                        const res = await verifyTarget(temp as any, { preferredSelector: cand.selector, strict: true });
+                        toast.push(res.ok ? 'Target OK' : (res.reason === 'missing' ? 'Missing' : 'Not editable'));
+                      } catch {
+                        toast.push('Test failed');
+                      }
+                    }}
+                  >
+                    Test
+                  </button>
+                </div>
+              ))}
             </div>
             <div className="flex gap-2 justify-end">
               <button
                 className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                onClick={() => setPendingInsert(null)}
+                onClick={() => {
+                  setTargetChooser(null);
+                  setTargetSelection(0);
+                  toast.push('Insert cancelled');
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
+                onClick={async () => {
+              const cand = targetChooser.candidates[targetSelection] || targetChooser.candidates[0];
+                setTargetChooser(null);
+                setTargetSelection(0);
+                const temp: FieldMapping = {
+                  section: targetChooser.section,
+                  selector: cand.selector,
+                  strategy: 'value',
+                  verified: false,
+                  framePath: cand.framePath,
+                  target: (cand.framePath && cand.framePath.length) ? 'iframe' : 'page'
+                } as any;
+                lastCandidateRef.current = { section: targetChooser.section, selector: cand.selector, framePath: cand.framePath };
+                await finalizeInsert(targetChooser.section, temp as FieldMapping, targetChooser.payload, { selector: cand.selector, strict: true });
+              }}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingInsert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/30" />
+          <div className="relative z-10 w-[460px] max-w-[95vw] rounded-lg border border-slate-200 bg-white shadow-xl p-4 space-y-3">
+            <div className="text-sm font-medium">Review insert → {pendingInsert.section}</div>
+            <div className="grid gap-2 text-[12px]">
+              <div className="text-slate-600">
+                <div className="font-medium text-slate-700">Existing content</div>
+                <div className="rounded border border-slate-200 bg-slate-50 p-2 min-h-[48px] whitespace-pre-wrap">
+                  {pendingInsertLoading ? 'Loading…' : (pendingInsertExisting ?? '(unavailable)')}
+                </div>
+              </div>
+              <div className="text-slate-600">
+                <div className="font-medium text-slate-700">New content</div>
+                <textarea
+                  className="w-full rounded border border-slate-300 bg-white p-2 h-32 text-[12px] font-mono"
+                  value={pendingInsertDraft}
+                  onChange={(e) => setPendingInsertDraft(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                onClick={() => {
+                  setPendingInsert(null);
+                  toast.push('Insert cancelled');
+                }}
               >
                 Cancel
               </button>
@@ -1235,12 +2280,16 @@ ${section.join(' ')}`;
                 className="px-2 py-1 text-xs rounded-md bg-indigo-600 text-white"
                 onClick={async () => {
                   const field = profile?.[pendingInsert.section];
-                  if (field?.selector) {
-                    const strategy = await insertUsingMapping(field as any, pendingInsert.payload);
-                    toast.push(`Insert ${pendingInsert.section} via ${strategy}`);
-                    pushWsEvent(`audit: ${pendingInsert.section.toLowerCase()} inserted`);
-                    audit('insert_ok', { strategy, section: pendingInsert.section });
-                  }
+                  if (!field) { setPendingInsert(null); return; }
+                  await finalizeInsert(pendingInsert.section, field as FieldMapping, pendingInsertDraft, {
+                    selector: pendingInsert.selector,
+                    strict: pendingInsertMeta?.strict ?? true
+                  });
+                  telemetry.recordEvent('insert_preview_confirmed', {
+                    section: pendingInsert.section,
+                    selector: pendingInsert.selector,
+                    edited: pendingInsertDraft !== pendingInsert.payload
+                  }).catch(() => {});
                   setPendingInsert(null);
                 }}
               >
@@ -1254,15 +2303,94 @@ ${section.join(' ')}`;
       <div className="min-h-screen" style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <main className="shadow-2xl border border-slate-200" style={panelStyle}>
           <div className="p-4 space-y-4">
-            <Header
-              recording={recording}
-              focusMode={focusMode}
-              opacity={opacity}
-              mode={mode}
-              wsState={wsState}
-              onToggleFocus={() => setFocusMode((v) => !v)}
-              onOpacity={setOpacity}
-              onOpenSettings={() => setSettingsOpen((v) => !v)}
+          <Header
+            recording={recording}
+            focusMode={focusMode}
+            opacity={opacity}
+            mode={mode}
+            wsState={wsState}
+            host={host}
+            hostAllowed={!!host && allowedHosts.includes(host)}
+            pairingEnabled={pairingState.enabled}
+            pairingSummary={pairingSummary}
+            pairingBusy={pairingBusy}
+            onTogglePairing={onTogglePairing}
+            onToggleFocus={() => setFocusMode((v) => !v)}
+            onOpacity={setOpacity}
+            onOpenHelp={() => setHelpOpen(true)}
+            onOpenSettings={() => setSettingsOpen((v) => !v)}
+          />
+          {tipOpen && (
+            <div className="rounded-md border border-slate-200 bg-indigo-50/80 px-2 py-1 text-[12px] text-slate-800 flex items-center justify-between">
+              <div>
+                First time? 1) <button className="underline" onClick={() => pairToThisTab()}>Pair</button> · 2) <button className="underline" onClick={() => mapSoapHere()}>Map SOAP</button> · 3) Preview (Alt+G) · 4) Insert (Alt+Enter)
+              </div>
+              <button aria-label="Dismiss tip" className="ml-2 px-1 text-slate-600 hover:text-slate-900" onClick={dismissTip}>✕</button>
+            </div>
+          )}
+          <div className="flex items-center justify-between text-[12px] text-slate-600">
+            <div>
+              Inserts: <span className="font-semibold">{metrics.inserts}</span> · Verify fails: <span className="font-semibold text-amber-700">{metrics.verifyFail}</span> · p50: <span className="font-semibold">{metrics.p50} ms</span> · p95: <span className="font-semibold">{metrics.p95} ms</span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => { try { await refreshMetrics(); } catch {} }}
+              >Refresh</button>
+              <button
+                title="Pair to this tab"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => pairToThisTab()}
+              >Pair to tab</button>
+              <button
+                title="Map SOAP (PLAN) to the editor you click"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => mapSoapHere()}
+              >Map SOAP here</button>
+              <button
+                title="Insert Plan now"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => {
+                  const plan = (composedNote && composedNote.sections && (composedNote.sections['Plan'] || composedNote.sections['PLAN'])) || null;
+                  if (plan) await onInsert('PLAN', { payloadOverride: plan });
+                  else await onInsert('PLAN');
+                }}
+              >Insert Plan</button>
+              <button
+                title="Open the built-in Mock EHR test page"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={() => openMockEhr()}
+              >Open Mock EHR</button>
+              <button
+                title="Open inline Plan panel (in-tab)"
+                className="px-2 py-0.5 text-xs rounded-md border border-slate-300"
+                onClick={async () => { try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'INLINE_PLAN_OPEN' }); } catch {} }}
+              >Inline Plan Panel</button>
+              <button
+                title="Privacy Shield"
+                className={`px-2 py-0.5 text-xs rounded-md border ${redactedOverlay && !auditScreenshots ? 'border-emerald-500 text-emerald-700' : 'border-slate-300'}`}
+                onClick={async () => {
+                  if (redactedOverlay && !auditScreenshots) {
+                    // turn off shield
+                    setRedactedOverlay(false);
+                    try { await chrome.storage.local.set({ OVERLAY_REDACTED: false }); } catch {}
+                    try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: false }); } catch {}
+                  } else {
+                    // enable redaction and disable audit screenshots
+                    setRedactedOverlay(true);
+                    try { await chrome.storage.local.set({ OVERLAY_REDACTED: true }); } catch {}
+                    try { const tab = await getContentTab(); if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on: true }); } catch {}
+                    setAuditScreenshots(false);
+                    try { await chrome.storage.local.set({ AUDIT_SCREENSHOT_ENABLED: false }); } catch {}
+                  }
+                }}
+              >Shield</button>
+            </div>
+          </div>
+            <WindowIndicator
+              pairingEnabled={pairingEnabled}
+              pairingSummary={pairingSummary}
+              lastKnown={windowTrackState.lastKnown}
             />
             {(recording || wsState !== 'disconnected') && (
               <div className="rounded-md border border-slate-200 bg-white/90 px-2 py-1 text-[12px] text-slate-700" style={{maxHeight: 56, overflow: 'hidden'}}>
@@ -1355,6 +2483,118 @@ ${section.join(' ')}`;
                     Close
                   </button>
                 </div>
+                <div className="mt-2 rounded-md border border-slate-200 p-2">
+                  <div className="text-[12px] font-medium text-slate-800 mb-1">Note Field Mode</div>
+                  <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                    <input type="checkbox" checked={singleFieldMode} onChange={(e) => onToggleSingleFieldMode(e.target.checked)} />
+                    Single note field mode for this site ({host || 'unknown'})
+                  </label>
+                  <div className="text-[11px] text-slate-500 mt-1">If your EHR uses a single editor for the entire note, enable this to focus previews and inserts on that one field.</div>
+                </div>
+                <div className="text-sm font-medium mt-3">Overlay</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Redact ghost preview text</span>
+                  <input
+                    type="checkbox"
+                    checked={redactedOverlay}
+                    onChange={async (e) => {
+                      const on = !!e.target.checked;
+                      setRedactedOverlay(on);
+                      try { await chrome.storage.local.set({ OVERLAY_REDACTED: on }); } catch {}
+                      try {
+                        const tab = await getContentTab();
+                        if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_SET_REDACTED', on });
+                      } catch {}
+                    }}
+                  />
+                </label>
+                <div className="text-sm font-medium mt-3">Voice</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Enable voice queries (vitals/meds/allergies)</span>
+                  <input
+                    type="checkbox"
+                    checked={voiceQueriesEnabled}
+                    onChange={(e) => setVoiceQueriesEnabled(!!e.target.checked)}
+                  />
+                </label>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Use AudioWorklet VAD (experimental)</span>
+                  <input
+                    type="checkbox"
+                    checked={useRouterVad}
+                    onChange={(e) => setUseRouterVad(!!e.target.checked)}
+                  />
+                </label>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Show command HUD pill</span>
+                  <input
+                    type="checkbox"
+                    checked={showCommandHud}
+                    onChange={(e) => setShowCommandHud(!!e.target.checked)}
+                  />
+                </label>
+                <div className="text-sm font-medium mt-3">PHI Session</div>
+                <button
+                  className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                  onClick={async () => {
+                    try {
+                      const encId = encounterIdRef.current;
+                      if (encId) {
+                        await deletePHIMap(encId);
+                        try { phiKeyManager.deleteKey(encId); } catch {}
+                        encounterIdRef.current = null;
+                        setEncounterId(null);
+                        toast.push('PHI session cleared');
+                      } else {
+                        toast.push('No active encounter');
+                      }
+                    } catch {
+                      toast.push('Failed to clear PHI session');
+                    }
+                  }}
+                >
+                  Purge keys & PHI maps
+                </button>
+                <div className="text-sm font-medium mt-3">Window Management</div>
+                <div className="text-[12px] text-slate-600">Keep AssistMD magnetized next to allowed EHR windows.</div>
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Auto-open floating assistant window</span>
+                  <input type="checkbox" checked={pairingEnabled} onChange={(e) => onTogglePairing(e.target.checked)} />
+                </label>
+                <div className="text-sm font-medium mt-3">Insert Mode</div>
+                <div className="text-[12px] text-slate-600">Choose Append (default) or Replace per section.</div>
+                {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
+                  <label key={`mode-${sec}`} className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                    <span>{sec}</span>
+                    <select
+                      className="rounded border border-slate-300 px-2 py-1 text-xs"
+                      value={insertModes[sec]}
+                      onChange={async (e) => {
+                        const val = (e.target.value === 'replace' ? 'replace' : 'append') as 'append'|'replace';
+                        const next = { ...insertModes, [sec]: val };
+                        setInsertModes(next);
+                        try { await chrome.storage.local.set({ INSERT_MODES: next }); toast.push('Insert mode saved'); } catch {}
+                      }}
+                    >
+                      <option value="append">Append</option>
+                      <option value="replace">Replace</option>
+                    </select>
+                  </label>
+                ))}
+                <label className="mt-2 flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  <span>Auto-pair on allowed hosts</span>
+                  <input
+                    type="checkbox"
+                    checked={autoPairOnAllowed}
+                    onChange={async (e) => {
+                      const val = !!e.target.checked;
+                      try { await chrome.storage.local.set({ WINDOW_PAIR_AUTO: val }); } catch {}
+                      setAutoPairOnAllowed(val);
+                      toast.push(val ? 'Auto-pair enabled' : 'Auto-pair disabled');
+                    }}
+                  />
+                </label>
+                <div className="text-[11px] text-slate-500">{pairingEnabled ? pairingSummary : 'Disabled — enable to magnetize on allowed hosts.'}</div>
                 <div className="text-sm font-medium mt-3">Fallback Selectors</div>
                 <div className="text-[12px] text-slate-600">Optional comma‑separated selectors used if the primary mapping is missing.</div>
                 {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
@@ -1397,22 +2637,16 @@ ${section.join(' ')}`;
                 </div>
                 <div className="text-[12px] text-slate-500">After updating the API base, reload the EHR page and start again.</div>
                 <div className="text-sm font-medium mt-3">Templates</div>
+                <div className="text-[11px] text-slate-500">
+                  {features.tplPerHost
+                    ? `Scoped to ${host || 'global default'}`
+                    : 'Applies to all hosts'}
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {(['PLAN','HPI','ROS','EXAM'] as Section[]).map((sec) => (
                     <button key={sec}
                       className="px-2 py-1 text-xs rounded-md border border-slate-300"
-                      onClick={async () => {
-                        const cur = defaultTemplates[sec];
-                        const next = window.prompt(`Edit ${sec} template`, cur);
-                        if (next === null) return;
-                        try {
-                          const key = (features.tplPerHost && host) ? `TPL_${host}_${sec}` : `TPL_${sec}`;
-                          await chrome.storage.local.set({ [key]: next });
-                          (defaultTemplates as any)[sec] = next;
-                          toast.push(`${sec} template saved`);
-                          scheduleBackup();
-                        } catch { toast.push('Save failed'); }
-                      }}
+                      onClick={async () => { await editTemplate(sec); }}
                     >
                       Edit {sec}
                     </button>
@@ -1428,7 +2662,8 @@ ${section.join(' ')}`;
                         (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
                         (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
                         (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
-                        toast.push('Templates loaded');
+                        const scope = features.tplPerHost ? (host || 'global default') : 'all hosts';
+                        toast.push(`Templates loaded (${scope})`);
                       } catch { toast.push('Load failed'); }
                     }}
                   >
@@ -1485,8 +2720,63 @@ ${section.join(' ')}`;
                     <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={() => ensurePerms()}>Request Permissions</button>
                   </div>
                 </div>
+                <div className="text-sm font-medium mt-3">Host Allowlist</div>
+                <div className="text-[12px] text-slate-700 space-y-2">
+                  <div>Current: <span className="font-mono">{host || '(none)'}</span> {host && allowedHosts.includes(host) ? <span className="text-emerald-600">(allowed)</span> : <span className="text-amber-600">(not allowed)</span>}</div>
+                  <div className="flex gap-2 flex-wrap">
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={addCurrentHostToAllowlist} disabled={!host}>Allow Current Host</button>
+                    <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={() => { if (host) removeHostFromAllowlist(host); }} disabled={!host || !allowedHosts.includes(host)}>Remove Current Host</button>
+                  </div>
+                  {allowedHosts && allowedHosts.length > 0 && (
+                    <div className="text-[11px] text-slate-600">Allowed: {allowedHosts.map((h) => (
+                      <button key={h} className="mr-2 underline" onClick={() => removeHostFromAllowlist(h)} title="Remove">{h}</button>
+                    ))}</div>
+                  )}
+                </div>
+                <div className="text-sm font-medium mt-3">Mappings</div>
+                <div className="text-[12px] text-slate-700 space-y-1">
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onTestMappings}>Test Mappings</button>
+                </div>
+                <div className="text-sm font-medium mt-3">Safety Utilities</div>
+                <div className="text-[12px] text-slate-700 space-y-1 flex gap-2 flex-wrap">
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => { try { await chrome.storage.local.remove(['ASSIST_CONFIRMED_FP']); toast.push('Patient confirmation reset'); } catch {} }}
+                  >
+                    Reset Patient Confirmation
+                  </button>
+                  <button
+                    className="px-2 py-1 text-xs rounded-md border border-slate-300"
+                    onClick={async () => {
+                      if (!host) { toast.push('No host'); return; }
+                      try { await chrome.storage.local.remove([`MAP_${host}`]); toast.push('Cleared mappings for host'); setProfile({} as any); } catch { toast.push('Failed to clear mappings'); }
+                    }}
+                  >
+                    Clear Mappings (This Host)
+                  </button>
+                </div>
+                <div className="text-sm font-medium mt-3">Connection Self‑Test</div>
+                <div className="text-[12px] text-slate-700 space-y-1 flex gap-2 flex-wrap">
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onSelfTestPresign} disabled={busy}>Presign Test</button>
+                  <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={onSelfTestWS} disabled={busy}>WS Quick Test</button>
+                </div>
                 <div className="text-sm font-medium mt-3">Telemetry (local)</div>
                 <div className="text-[12px] text-slate-700">
+                  <div className="mb-2 rounded-md border border-slate-200 bg-white/90 p-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div>Insert latency p50: <span className="font-semibold">{metrics.p50} ms</span></div>
+                        <div>Insert latency p95: <span className="font-semibold">{metrics.p95} ms</span></div>
+                      </div>
+                      <div className="text-right">
+                        <div>Inserts: <span className="font-semibold">{metrics.inserts}</span></div>
+                        <div>Verify fails: <span className="font-semibold text-amber-700">{metrics.verifyFail}</span></div>
+                      </div>
+                    </div>
+                    <div className="mt-2">
+                      <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={refreshMetrics}>Refresh</button>
+                    </div>
+                  </div>
                   We store recent timing and outcome events locally to help debug (no network). You can export or clear them here.
                   <div className="mt-2 flex gap-2">
                     <button className="px-2 py-1 text-xs rounded-md border border-slate-300" onClick={async () => {
@@ -1535,6 +2825,15 @@ ${section.join(' ')}`;
                 </div>
               </div>
             )}
+            {helpOpen && (
+              <QuickStartGuide
+                onClose={() => setHelpOpen(false)}
+                onOpenSettings={() => {
+                  setHelpOpen(false);
+                  setSettingsOpen(true);
+                }}
+              />
+            )}
             {wsState === 'connecting' && (
               <div className="text-xs text-slate-500">Connecting to ASR…</div>
             )}
@@ -1553,8 +2852,19 @@ ${section.join(' ')}`;
                 </button>
               </div>
             )}
-            <CommandStrip message={commandMessage} />
+            <CommandStrip message={commandMessage} speechState={speechRecognitionState} />
             <TranscriptList />
+
+            {/* Chat Log for Assistant Messages */}
+            {chatLog.length > 0 && (
+              <div className="mt-4 mb-4">
+                <div className="text-xs font-semibold text-gray-400 mb-2 px-1">
+                  💬 Assistant Chat
+                </div>
+                <ChatLog messages={chatLog} autoScroll={true} />
+              </div>
+            )}
+
             {wsMonitor}
             {commandLog.length > 0 && (
               <div className="text-[11px] text-slate-500 space-y-1 border border-slate-200 bg-white/80 rounded-lg px-3 py-2">
@@ -1568,9 +2878,9 @@ ${section.join(' ')}`;
               busy={busy}
               onToggleRecord={onToggleRecord}
               onInsertPlan={() => onInsert('PLAN')}
-              onInsertHPI={features.multi ? (() => onInsert('HPI')) : undefined}
-              onInsertROS={features.multi ? (() => onInsert('ROS')) : undefined}
-              onInsertEXAM={features.multi ? (() => onInsert('EXAM')) : undefined}
+              onInsertHPI={features.multi && !singleFieldMode ? (() => onInsert('HPI')) : undefined}
+              onInsertROS={features.multi && !singleFieldMode ? (() => onInsert('ROS')) : undefined}
+              onInsertEXAM={features.multi && !singleFieldMode ? (() => onInsert('EXAM')) : undefined}
               onUndo={features.undo ? (async () => {
                 const ok = await undoLastInsert();
                 toast.push(ok ? 'Undo applied' : 'Nothing to undo');
@@ -1579,7 +2889,176 @@ ${section.join(' ')}`;
               transcriptFormat={transcriptFormat}
               onFormatChange={setTranscriptFormat}
               onMapFields={onMapFields}
+              onGhostPreview={sendGhostPreview}
+              onClearPreview={async () => {
+                setGhostPreview(null);
+                try {
+                  const tab = await getContentTab();
+                  if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: 'GHOST_CLEAR' });
+                } catch {}
+              }}
+              onComposeNote={handleComposeNote}
+              hasTranscript={transcript.get().length > 0}
             />
+            {composedNote && (
+              <div className="mt-3 rounded-lg border border-slate-200 bg-white/90 p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="text-sm font-medium">Composed Note</div>
+                    {Array.isArray((composedNote as any).flags) && (composedNote as any).flags.length > 0 && (
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full border ${
+                          (composedNote as any).flags.some((f: any) => f.severity === 'high')
+                            ? 'bg-rose-100 text-rose-800 border-rose-200'
+                            : 'bg-amber-100 text-amber-800 border-amber-200'
+                        }`}
+                        title="Safety warnings"
+                      >
+                        ⚠️ {(composedNote as any).flags.length}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-2 py-0.5 text-[11px] rounded-md border border-slate-300 hover:bg-slate-50"
+                      onClick={async () => {
+                        try {
+                          for (const [sec] of Object.entries(composedNote.sections)) {
+                            await insertComposed(sec);
+                          }
+                          toast.push('All sections inserted');
+                        } catch { toast.push('Insert all failed'); }
+                      }}
+                      title="Insert all sections"
+                    >Insert All</button>
+                    <div className="text-[11px] text-slate-600">{getNoteSummary(composedNote)}</div>
+                  </div>
+                </div>
+                
+                {!singleFieldMode && Object.entries(composedNote.sections).map(([sec, txt]) => {
+                  // Render text with clickable timestamp links
+                  const renderTextWithTimestamps = (text: string) => {
+                    const timestampRegex = /\[(\d{2}:\d{2}(?::\d{2})?)\]/g;
+                    const parts: (string | JSX.Element)[] = [];
+                    let lastIndex = 0;
+                    let match;
+                    let keyCounter = 0;
+
+                    while ((match = timestampRegex.exec(text)) !== null) {
+                      // Add text before timestamp
+                      if (match.index > lastIndex) {
+                        parts.push(text.slice(lastIndex, match.index));
+                      }
+                      // Add clickable timestamp
+                      const timestamp = match[1];
+                      parts.push(
+                        <button
+                          key={`ts-${keyCounter++}`}
+                          className="text-indigo-600 hover:text-indigo-800 hover:underline font-mono text-[11px] mx-0.5"
+                          onClick={() => toast.push(`Jump to ${timestamp} (audio playback not yet wired)`)}
+                          title={`Jump to ${timestamp} in transcript`}
+                        >
+                          [{timestamp}]
+                        </button>
+                      );
+                      lastIndex = match.index + match[0].length;
+                    }
+                    // Add remaining text
+                    if (lastIndex < text.length) {
+                      parts.push(text.slice(lastIndex));
+                    }
+                    return parts.length > 0 ? parts : text;
+                  };
+
+                  return (
+                    <div key={sec} className="border border-slate-100 rounded-md p-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-semibold">{sec}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-[11px] text-slate-500">{String(txt||'').length} chars</div>
+                          <button
+                            className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
+                            onClick={async () => { try { await navigator.clipboard.writeText(String(txt||'')); toast.push(`${sec} copied`); } catch { toast.push('Copy failed'); } }}
+                            title={`Copy ${sec}`}
+                          >Copy</button>
+                          <button
+                            className="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50"
+                            onClick={() => insertComposed(sec)}
+                          >
+                            Insert {sec}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-1 text-[12px] whitespace-pre-wrap text-slate-700">
+                        {renderTextWithTimestamps(String(txt || '').slice(0, 800))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {composedNote.flags?.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                    <div className="font-semibold text-amber-900 flex items-center gap-2">
+                      ⚠️ Safety Warnings ({composedNote.flags.length})
+                    </div>
+                    {composedNote.flags.map((f, i) => {
+                      const severityColor = f.severity === 'high' ? 'text-rose-700 bg-rose-100' : f.severity === 'medium' ? 'text-amber-700 bg-amber-100' : 'text-slate-700 bg-slate-100';
+                      return (
+                        <div key={i} className={`rounded-md px-2 py-1 text-xs ${severityColor}`}>
+                          <span className="font-semibold uppercase">[{f.severity}]</span> {f.text}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {Array.isArray(composedNote.provenance) && composedNote.provenance.length > 0 && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="font-semibold text-slate-900">🕓 Citations</div>
+                      <button className="px-2 py-0.5 text-xs rounded-md border border-slate-300" onClick={() => setShowCitations(v => !v)}>
+                        {showCitations ? 'Hide' : 'Show'} ({composedNote.provenance.length})
+                      </button>
+                    </div>
+                    {showCitations && (
+                      <div className="text-[12px] text-slate-700 space-y-1">
+                        {composedNote.provenance.slice(0, 8).map((p, i) => (
+                          <div key={i}>• {formatProvenanceTime(p.timestamp)} {p.section ? `${p.section} — ` : ''}{p.sentence}</div>
+                        ))}
+                        {composedNote.provenance.length > 8 && (
+                          <div className="text-slate-500">…and {composedNote.provenance.length - 8} more</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {(composedNote as any).billing && (
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 space-y-2">
+                    <div className="font-semibold text-indigo-900">💼 Billing Codes</div>
+                    {(composedNote as any).billing.icd10?.length > 0 && (
+                      <div>
+                        <div className="text-xs font-medium text-indigo-800 mb-1">ICD-10 Diagnoses</div>
+                        {(composedNote as any).billing.icd10.map((code: any, i: number) => (
+                          <div key={i} className="text-xs text-indigo-700 ml-2">
+                            • <span className="font-mono">{code.code}</span> - {code.description}
+                            <span className="text-indigo-500 ml-1">({code.confidence})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(composedNote as any).billing.cpt?.length > 0 && (
+                      <div>
+                        <div className="text-xs font-medium text-indigo-800 mb-1">CPT Procedures</div>
+                        {(composedNote as any).billing.cpt.map((code: any, i: number) => (
+                          <div key={i} className="text-xs text-indigo-700 ml-2">
+                            • <span className="font-mono">{code.code}</span> - {code.description}
+                            <span className="text-indigo-500 ml-1">({code.confidence})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {pendingGuard && !pendingGuard.ok && pendingGuard.fp && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2 text-sm space-y-2">
                 <div className="font-medium">Confirm patient before inserting</div>
@@ -1619,3 +3098,4 @@ ${section.join(' ')}`;
     </div>
   );
 }
+        try { await audit('record_start', { mode: 'init' }); } catch {}

@@ -13,13 +13,61 @@ type Props = {
   transcriptFormat?: 'RAW' | 'SOAP' | 'APSO';
   onFormatChange?: (fmt: 'RAW' | 'SOAP' | 'APSO') => void;
   onMapFields?: () => void;
+  onGhostPreview?: () => void;
+  onClearPreview?: () => void;
+  onComposeNote?: () => void;
+  hasTranscript?: boolean;
 };
 
-export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onInsertPlan, onInsertHPI, onInsertROS, onInsertEXAM, onUndo, onCopyTranscript, transcriptFormat = 'RAW', onFormatChange, onMapFields }) => {
+export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onInsertPlan, onInsertHPI, onInsertROS, onInsertEXAM, onUndo, onCopyTranscript, transcriptFormat = 'RAW', onFormatChange, onMapFields, onGhostPreview, onClearPreview, onComposeNote, hasTranscript = false }) => {
   const disabledLook = 'opacity-60 cursor-not-allowed';
   const canMapFields = typeof onMapFields === 'function';
 
   return (
+    <div className="space-y-3">
+      {/* Compose Note Section */}
+      {onComposeNote && (
+        <div className="rounded-lg border border-slate-200 bg-white p-3">
+          <button
+            onClick={onComposeNote}
+            disabled={!hasTranscript}
+            className={`w-full rounded-lg px-4 py-2 font-semibold ${
+              hasTranscript
+                ? 'bg-green-600 hover:bg-green-500 text-white'
+                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+            }`}
+          >
+            📝 Compose Note (with PHI)
+          </button>
+          <p className="mt-2 text-xs text-slate-500 text-center">
+            Generate complete note with patient information
+          </p>
+        </div>
+      )}
+
+      {/* Ghost Preview Buttons */}
+      {(onGhostPreview || onClearPreview) && (
+        <div className="flex gap-2">
+          {onGhostPreview && (
+            <button
+              onClick={onGhostPreview}
+              className="flex-1 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
+            >
+              Preview Insert (ghost)
+            </button>
+          )}
+          {onClearPreview && (
+            <button
+              onClick={onClearPreview}
+              className="rounded-lg bg-slate-600 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-500"
+            >
+              Clear Preview
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Original Controls */}
     <div className="grid grid-cols-2 gap-2">
       <button
         onClick={onToggleRecord}
@@ -100,6 +148,7 @@ export const Controls: React.FC<Props> = ({ recording, busy, onToggleRecord, onI
           Undo Last Insert
         </button>
       )}
+    </div>
     </div>
   );
 };

@@ -25,6 +25,9 @@ async function copyStatic() {
   try {
     await cp(join(root, 'public', 'worklet.js'), join(distDir, 'worklet.js'));
   } catch {}
+  try {
+    await cp(join(root, 'public', 'audio-router-worklet.js'), join(distDir, 'audio-router-worklet.js'));
+  } catch {}
 }
 
 async function injectPanelHtml() {
@@ -108,4 +111,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-

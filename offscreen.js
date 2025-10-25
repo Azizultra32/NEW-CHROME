@@ -68,6 +68,7 @@ let mediaStream = null;
 let audioCtx = null;
 let mediaSrc = null;
 let workletNode = null;
+let routerNode = null;
 let state = 'idle'; // idle | starting | running | stopping | error
 
 let rec = null;
@@ -76,9 +77,13 @@ let wsUrl = null;
 let hbTimer = null;
 let retryTimer = null;
 let retryDelayMs = 1000; // exponential backoff up to 10s
+let currentEncounterId = null;
 
 let cfg = { wsUrl: null, headers: {} };
 let suppressUntil = 0;
+
+let routerVadEnabled = false;
+let lastRouterVad = 'quiet';
 
 const ring = new Ring(SAMPLE_RATE * 10);
 const stage = new Staging(SAMPLE_RATE * 3);
@@ -114,6 +119,43 @@ async function start() {
     workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture', { processorOptions: { frameSize: FRAME_SIZE } });
     mediaSrc.connect(workletNode);
     workletNode.port.onmessage = handleFrame;
+
+    // Optional: load lightweight audio router/VAD (non-intrusive)
+    try {
+      await audioCtx.audioWorklet.addModule(chrome.runtime.getURL('audio-router-worklet.js'));
+      routerNode = new AudioWorkletNode(audioCtx, 'audio-router');
+      mediaSrc.connect(routerNode);
+      routerNode.port.onmessage = (ev) => {
+        const m = ev?.data;
+        if (!m) return;
+        if (m.type === 'vad') {
+          lastRouterVad = m.state === 'speaking' ? 'speaking' : 'quiet';
+          if (routerVadEnabled) {
+            if (lastRouterVad === 'speaking') {
+              speaking = true;
+              speechFrames = 0;
+              quietFrames = 0;
+              dictationHangFrames = HANG_FRAMES;
+              chrome.runtime.sendMessage({ type: 'ASR_VAD', state: 'speaking' }).catch(() => {});
+            } else {
+              // Quiet: allow hangdown naturally; if already at 0, mark quiet
+              if (dictationHangFrames === 0) {
+                speaking = false;
+                chrome.runtime.sendMessage({ type: 'ASR_VAD', state: 'quiet' }).catch(() => {});
+              }
+            }
+          }
+        }
+      };
+      // Load preference from storage
+      try {
+        chrome.storage.local.get(['FEAT_ROUTER_VAD']).then((res) => {
+          routerVadEnabled = !!res?.FEAT_ROUTER_VAD;
+        }).catch(() => {});
+      } catch {}
+    } catch (e) {
+      console.warn('[OFF] audio-router worklet unavailable', e);
+    }
 
     console.log(`[${TAG}][GUM] tracks=`, mediaStream?.getTracks()?.length ?? 0);
 
@@ -216,7 +258,12 @@ function connectWs(url) {
       const m = JSON.parse(ev.data);
       if (m?.type === 'partial' && m?.text) {
         console.log(`[${TAG}][WS][PARTIAL]`, m.text.slice(0, 60));
+        // Forward partial for display
         chrome.runtime.sendMessage({ type: 'ASR_PARTIAL', text: m.text, t0: m.t0, t1: m.t1 }).catch(() => {});
+        // Forward PHI map updates (if present)
+        if (m.phiMap && currentEncounterId) {
+          chrome.runtime.sendMessage({ type: 'PHI_MAP_UPDATE', encounterId: currentEncounterId, phiMap: m.phiMap }).catch(() => {});
+        }
       }
     } catch {
       // ignore binary frames
@@ -258,7 +305,13 @@ chrome.runtime.onMessage.addListener((m) => {
   }
   if (m?.type === 'ASR_CONNECT' && m.wssUrl) {
     const ensure = state === 'idle' ? start() : Promise.resolve();
-    Promise.resolve(ensure).then(() => connectWs(m.wssUrl));
+    Promise.resolve(ensure).then(() => {
+      try {
+        const u = new URL(m.wssUrl);
+        currentEncounterId = u.searchParams.get('encounterId') || null;
+      } catch { currentEncounterId = null; }
+      connectWs(m.wssUrl);
+    });
   }
   if (m?.type === 'ASR_DISCONNECT') {
     try { ws && ws.readyState === WebSocket.OPEN && ws.close(); } catch {}
@@ -266,6 +319,11 @@ chrome.runtime.onMessage.addListener((m) => {
   }
   if (m?.type === 'COMMAND_WINDOW' && typeof m.ms === 'number') {
     suppressUntil = performance.now() + Math.max(0, m.ms | 0);
+  }
+  if (m?.type === 'SET_VAD_MODE') {
+    routerVadEnabled = m?.mode === 'router';
+    try { chrome.storage.local.set({ FEAT_ROUTER_VAD: routerVadEnabled }); } catch {}
+    chrome.runtime.sendMessage({ type: 'ASR_VAD_MODE', mode: routerVadEnabled ? 'router' : 'legacy' }).catch(() => {});
   }
 });
 

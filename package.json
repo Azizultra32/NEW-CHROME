@@ -1,6 +1,6 @@
 {
   "name": "assistmd-extension",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,10 +9,16 @@
     "build:clean": "npm run clean && npm run build",
     "setup": "npm ci && npm run build",
     "start": "node server.js",
+    "start:backend": "cd backend && npm start",
+    "start:mock": "node server.js",
     "lint": "tsc --noEmit",
+    "test:unit": "vitest run",
     "dev": "node scripts/dev.mjs",
+    "dev:backend": "cd backend && npm run dev",
     "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
-    "test:e2e": "playwright test || echo 'Playwright not installed in CI'"
+    "test:e2e": "playwright test || echo 'Playwright not installed in CI'",
+    "test:e2e:chrome": "node scripts/run-extension-e2e.mjs",
+    "smoke:backend": "node -e \"fetch('http://localhost:8080/health',{duplex:'half'}).then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}).catch(e=>{console.error('health failed');process.exit(1)})\""
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -22,15 +28,18 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.47.2",
     "@types/chrome": "^0.0.270",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.5",
-    "@playwright/test": "^1.47.2",
     "autoprefixer": "^10.4.20",
+    "chrome-types": "^0.1.378",
     "esbuild": "^0.25.0",
     "postcss": "^8.4.41",
     "rimraf": "^6.0.1",
     "tailwindcss": "^3.4.13",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0",
+    "jsdom": "^24.0.0"
   }
 }

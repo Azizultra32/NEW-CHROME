@@ -1,5 +1,12 @@
 [byterover-mcp]
 
+## CRITICAL SESSION RECOVERY - 2024-09-24
+**Last Active Session**: Fixed voice command recognition issues
+**Full Context**: See `/Users/ali/CODEX-AIEWEB+/.claude/SESSION_SNAPSHOT_2024-09-24.md`
+**Current Branch**: `feat/allowlist-and-mapping-test`
+**Key Achievement**: Voice commands now work repeatedly (not just first try)
+**Pending**: Review other AI's uncommitted changes for voice functionality
+
 # Byterover MCP Server Tools Reference
 
 There are two main workflows with Byterover tools and recommended tool call strategies that you **MUST** follow precisely.

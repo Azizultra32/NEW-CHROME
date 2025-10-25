@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { existsSync, statSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 test('dist build has expected files', async () => {
   const root = join(__dirname, '../../');
@@ -11,4 +14,3 @@ test('dist build has expected files', async () => {
   }
   expect(statSync(join(dist, 'assets/sidepanel.js')).size).toBeGreaterThan(50_000);
 });
-
