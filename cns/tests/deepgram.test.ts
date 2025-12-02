@@ -101,4 +101,27 @@ describe('deepgram enrichment', () => {
     expect(enriched.clinicianId).toBe('clin-storage');
     expect(consentManager.handleChunk).toHaveBeenCalledWith(enriched);
   });
+
+  it('flags consent pending and unmapped metadata speakers', () => {
+    const enriched = enrichChunk(
+      { id: 'c4', transcript: 'meta speaker', start: 3, end: 4, metadata: { speaker_role: 'observer' } },
+      { ...baseSession, consentGranted: false, consentRequired: true }
+    );
+    expect(enriched.alerts).toContain('consent_pending');
+    expect(enriched.alerts).toContain('speaker_role_unmapped');
+  });
+
+  it('persists enriched chunks with consent context before broadcasting', async () => {
+    const storage = new MemoryStorage();
+    const broadcast = vi.fn();
+    const { enriched, persisted } = await processDeepgramChunk({
+      chunk: { id: 'c5', transcript: 'persist me', start: 4, end: 5, speaker: 0 },
+      session: { ...baseSession, consentGranted: true },
+      storage,
+      broadcast
+    });
+    expect(persisted).toBe(true);
+    expect(storage.inserted[0].consentGranted).toBe(true);
+    expect(broadcast).toHaveBeenCalledWith(enriched);
+  });
 });

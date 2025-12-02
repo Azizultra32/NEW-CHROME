@@ -9,6 +9,15 @@ const __dirname = dirname(__filename);
 const root = resolve(__dirname, '..');
 const distDir = join(root, 'dist');
 
+const STATIC_FILES = [
+  // Keep dev server aligned with locked architecture: single dist/content.js
+  'manifest.json',
+  'background.js',
+  'content.js',
+  'offscreen.html',
+  'offscreen.js'
+];
+
 async function ensureDist() {
   await rm(distDir, { recursive: true, force: true });
   await mkdir(distDir, { recursive: true });
@@ -17,8 +26,7 @@ async function ensureDist() {
 }
 
 async function copyStatic() {
-  const files = ['manifest.json', 'background.js', 'content.js', 'offscreen.html', 'offscreen.js'];
-  await Promise.all(files.map(async (file) => {
+  await Promise.all(STATIC_FILES.map(async (file) => {
     await cp(join(root, file), join(distDir, file));
   }));
   await cp(join(root, 'icons'), join(distDir, 'icons'), { recursive: true });
@@ -78,7 +86,7 @@ async function startEsbuildWatch() {
 }
 
 async function watchStatic() {
-  const files = ['manifest.json', 'background.js', 'content.js', 'offscreen.html', 'offscreen.js', 'sidepanel.html'];
+  const files = [...STATIC_FILES, 'sidepanel.html'];
   for (const f of files) {
     const src = join(root, f);
     const dest = join(distDir, f);

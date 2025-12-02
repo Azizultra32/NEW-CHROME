@@ -11,6 +11,15 @@ const __dirname = dirname(__filename);
 const root = resolve(__dirname, '..');
 const distDir = join(root, 'dist');
 
+const STATIC_FILES = [
+  // Canonical static bundle: single content script lives at dist/content.js
+  'manifest.json',
+  'background.js',
+  'content.js',
+  'offscreen.html',
+  'offscreen.js'
+];
+
 async function ensureDist() {
   await rm(distDir, { recursive: true, force: true });
   await mkdir(distDir, { recursive: true });
@@ -46,8 +55,7 @@ async function buildTailwind() {
 }
 
 async function copyStatic() {
-  const files = ['manifest.json', 'background.js', 'content.js', 'offscreen.html', 'offscreen.js'];
-  await Promise.all(files.map(async (file) => {
+  await Promise.all(STATIC_FILES.map(async (file) => {
     await cp(join(root, file), join(distDir, file));
   }));
   try {
