@@ -5,9 +5,15 @@ import { ConsentManager, DeepgramChunk, EnrichedChunk, Logger, SessionMetadata, 
 function mapSpeakerRole(chunk: DeepgramChunk, session: SessionMetadata): { role: EnrichedChunk['role']; alerts: string[] } {
   const alerts: string[] = [];
   const mapping = session.speakerRoles || {};
-  const key = chunk.speaker !== undefined ? String(chunk.speaker) : undefined;
+  const metadataRole = typeof chunk.metadata?.speaker_role === 'string' ? chunk.metadata.speaker_role : undefined;
+  const key = metadataRole || (chunk.speaker !== undefined ? String(chunk.speaker) : undefined);
+
   if (key && mapping[key]) {
     return { role: mapping[key], alerts };
+  }
+
+  if (metadataRole && !mapping[metadataRole]) {
+    alerts.push('speaker_role_unmapped');
   }
 
   if (session.alertOnUnknownSpeaker) {
@@ -15,14 +21,20 @@ function mapSpeakerRole(chunk: DeepgramChunk, session: SessionMetadata): { role:
   }
 
   // fallback: assume speaker 0 clinician, 1 patient
-  if (chunk.speaker === 0) return { role: 'clinician', alerts };
-  if (chunk.speaker === 1) return { role: 'patient', alerts };
+  if (chunk.speaker === 0 || metadataRole === '0') return { role: 'clinician', alerts };
+  if (chunk.speaker === 1 || metadataRole === '1') return { role: 'patient', alerts };
 
   return { role: 'unknown', alerts };
 }
 
 export function enrichChunk(chunk: DeepgramChunk, session: SessionMetadata): EnrichedChunk {
   const { role, alerts } = mapSpeakerRole(chunk, session);
+  const consentRequired = session.consentRequired ?? true;
+  const consentGranted = session.consentGranted ?? false;
+  if (consentRequired && !consentGranted) {
+    alerts.push('consent_pending');
+  }
+
   return {
     ...chunk,
     role,
@@ -31,8 +43,8 @@ export function enrichChunk(chunk: DeepgramChunk, session: SessionMetadata): Enr
     sessionId: session.sessionId,
     clinicianId: session.clinicianId,
     patientId: session.patientId,
-    consentRequired: session.consentRequired ?? true,
-    consentGranted: session.consentGranted ?? false
+    consentRequired,
+    consentGranted
   };
 }
 

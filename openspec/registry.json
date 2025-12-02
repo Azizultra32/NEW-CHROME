@@ -1,0 +1,14 @@
+{
+  "lock-extension-architecture": {
+    "path": "openspec/specs/lock-extension-architecture.md",
+    "requiredSections": ["## Requirement", "## Architecture", "## Validation"]
+  },
+  "chrome-extension/spec": {
+    "path": "openspec/specs/chrome-extension/spec.md",
+    "requiredSections": ["## Requirement", "## Architecture", "## Validation"]
+  },
+  "chrome-extension/roadmap": {
+    "path": "openspec/specs/chrome-extension/roadmap.md",
+    "requiredSections": ["## Phases", "## Verification Ritual", "## Confession Block"]
+  }
+}

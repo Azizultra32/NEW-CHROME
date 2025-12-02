@@ -303,3 +303,5 @@ Display to User
 ---
 
 🎉 **You're all set!** Start dictating and watch the magic happen.
+## Doctrine Reminder
+If you must diverge from the locked architecture (e.g., temporary extra content script), log a Confession in HOLY_BIBLE.md and MASTER_SPEC.md, and include links to the commands run. Onboarding changes should always cite the Holy Bible when doctrine is bent.

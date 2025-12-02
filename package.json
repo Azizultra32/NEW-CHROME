@@ -2,6 +2,9 @@
   "name": "assistmd-extension",
   "version": "0.2.1",
   "private": true,
+  "bin": {
+    "openspec": "./bin/openspec.mjs"
+  },
   "type": "module",
   "scripts": {
     "clean": "rimraf dist",
@@ -19,7 +22,8 @@
     "release:zip": "cd dist && zip -rq ../assistmd-dist.zip .",
     "test:e2e": "playwright test || echo 'Playwright not installed in CI'",
     "test:e2e:chrome": "node scripts/run-extension-e2e.mjs",
-    "smoke:backend": "node -e \"fetch('http://localhost:8080/health',{duplex:'half'}).then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}).catch(e=>{console.error('health failed');process.exit(1)})\""
+    "smoke:backend": "node -e \"fetch('http://localhost:8080/health',{duplex:'half'}).then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}).catch(e=>{console.error('health failed');process.exit(1)})\"",
+    "test": "npm run test:unit && npm run test:cns"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

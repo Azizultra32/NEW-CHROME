@@ -1292,3 +1292,8 @@ See [CHANGELOG.md](../CHANGELOG.md) for detailed version history.
 **Document End**
 
 *This specification is maintained by the AssistMD development team. For questions or updates, contact: azizultra32*
+
+## Packaging & Build Locks
+- Content script is singular: compiled `dist/content.js` is the only injectable artifact. No source-path injections are permitted in production or tests.
+- All runtime assets (background, offscreen, side panel) must resolve from `dist/` outputs; references to `src/` are documentation-only.
+- Test harnesses (Vitest/Playwright) must import compiled entry points rather than loading fixtures via `fs`/`path` to mirror extension packaging.

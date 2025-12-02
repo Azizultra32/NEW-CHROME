@@ -1,0 +1,16 @@
+[
+  {
+    "id": "chunk-1",
+    "start": 0,
+    "end": 1.2,
+    "transcript": "hello patient",
+    "speaker": 0
+  },
+  {
+    "id": "chunk-2",
+    "start": 1.2,
+    "end": 2.5,
+    "transcript": "consent granted",
+    "speaker": 1
+  }
+]
