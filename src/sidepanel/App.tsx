@@ -3098,4 +3098,3 @@ ${section.join(' ')}`;
     </div>
   );
 }
-        try { await audit('record_start', { mode: 'init' }); } catch {}
