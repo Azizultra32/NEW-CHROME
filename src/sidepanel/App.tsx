@@ -1836,6 +1836,9 @@ ${section.join(' ')}`;
         setWsState('connecting');
         setLastError(null);
 
+        // Record session start for telemetry/audit trail
+        try { await audit('record_start', { mode: 'init' }); } catch {}
+
         try {
           const s = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -3098,4 +3101,3 @@ ${section.join(' ')}`;
     </div>
   );
 }
-        try { await audit('record_start', { mode: 'init' }); } catch {}
