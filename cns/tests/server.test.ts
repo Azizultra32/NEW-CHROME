@@ -39,6 +39,7 @@ describe('server', () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
     expect(res.body.deepgram.ok).toBe(true);
+    expect(res.body.automation).toEqual({ mapped: 0, filled: 0, undone: 0, failed: 0 });
   });
 
   it('validates map request and returns mapping', async () => {
@@ -52,10 +53,31 @@ describe('server', () => {
     expect(res.body.mapped.note).toBeDefined();
   });
 
+  it('returns actionable error when mapping fails', async () => {
+    class ThrowingDomEngine extends DomAutomationEngine {
+      override mapDocument(): any {
+        throw new Error('no_fields_requested');
+      }
+    }
+    const app = createApp({ storage: new FakeStorage(true), domEngine: new ThrowingDomEngine() });
+    const res = await request(app).post('/dom/map').send({ url: 'https://ehr.test', fields: ['note'] });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('map_failed');
+  });
+
   it('rejects invalid fill payload', async () => {
     const app = createApp({ storage: new FakeStorage(true) });
     const res = await request(app).post('/actions/fill').send({});
     expect(res.status).toBe(400);
+  });
+
+  it('surfaces fill engine failures with structured errors', async () => {
+    const app = createApp({ storage: new FakeStorage(true) });
+    const res = await request(app)
+      .post('/actions/fill')
+      .send({ map: { mapped: {}, confidence: 0.5 }, values: { note: '' }, visitId: 'v1' });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('fill_failed');
   });
 
   it('creates summary backed by storage data', async () => {
@@ -77,5 +99,6 @@ describe('server', () => {
     expect(res.status).toBe(200);
     expect(res.body.version).toBe(1);
     expect(storage.notes).toHaveLength(1);
+    expect(storage.notes[0].visitId).toBe('v1');
   });
 });

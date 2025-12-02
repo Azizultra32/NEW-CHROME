@@ -4,6 +4,11 @@ import { SessionMetadata, StorageClient } from '../src/types.js';
 
 class MemoryStorage implements StorageClient {
   public inserted: any[] = [];
+  public patientContext: { visitId: string; patientId?: string; clinicianId?: string } = {
+    visitId: 'v1',
+    patientId: 'pat-1',
+    clinicianId: 'clin-1'
+  };
   constructor(private readonly failUntil = 0) {}
   private attempts = 0;
   async insertTranscriptChunk(chunk: any): Promise<void> {
@@ -17,7 +22,7 @@ class MemoryStorage implements StorageClient {
     return [];
   }
   async fetchPatientContext() {
-    return { visitId: 'v1' };
+    return this.patientContext;
   }
   async persistGeneratedNote() {
     return { id: '1', version: 1, visitId: 'v1', content: '', type: 'summary' };
@@ -78,5 +83,22 @@ describe('deepgram enrichment', () => {
     });
     expect(persisted).toBe(true);
     expect(storage.inserted).toHaveLength(1);
+  });
+
+  it('hydrates clinician and patient identifiers before sending to consent manager', async () => {
+    const storage = new MemoryStorage();
+    storage.patientContext = { visitId: 'v1', clinicianId: 'clin-storage', patientId: 'pat-storage' };
+    const broadcast = vi.fn();
+    const consentManager = { handleChunk: vi.fn() };
+    const { enriched } = await processDeepgramChunk({
+      chunk: { id: 'c3', transcript: 'with context', start: 2, end: 3, speaker: 1 },
+      session: { ...baseSession, clinicianId: undefined, patientId: undefined },
+      storage,
+      broadcast,
+      consentManager
+    });
+    expect(enriched.patientId).toBe('pat-storage');
+    expect(enriched.clinicianId).toBe('clin-storage');
+    expect(consentManager.handleChunk).toHaveBeenCalledWith(enriched);
   });
 });

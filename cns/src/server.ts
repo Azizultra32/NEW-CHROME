@@ -35,16 +35,6 @@ const assistSchema = z.object({
   generatedBy: z.string().optional()
 });
 
-interface AutomationMetrics {
-  mapped: number;
-  filled: number;
-  undone: number;
-}
-
-function createMetrics(): AutomationMetrics {
-  return { mapped: 0, filled: 0, undone: 0 };
-}
-
 async function probeDeepgram(apiKey?: string): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
   if (!apiKey) return { ok: false, error: 'missing_api_key' };
   const start = Date.now();
@@ -63,7 +53,6 @@ export function createApp(options?: {
   storage?: StorageClient;
   logger?: Logger;
   deepgramApiKey?: string;
-  metrics?: AutomationMetrics;
   domEngine?: DomAutomationEngine;
   deepgramProbe?: typeof probeDeepgram;
 }) {
@@ -80,7 +69,6 @@ export function createApp(options?: {
       })();
   const assistService = new AssistService(supabase);
   const domEngine = options?.domEngine || new DomAutomationEngine();
-  const metrics = options?.metrics || createMetrics();
   const deepgramHealth = options?.deepgramProbe || probeDeepgram;
 
   app.get('/health', async (_req, res) => {
@@ -92,7 +80,7 @@ export function createApp(options?: {
       status: storageHealth.ok && dgHealth.ok ? 'ok' : 'degraded',
       storage: storageHealth,
       deepgram: dgHealth,
-      metrics
+      automation: domEngine.getMetrics()
     });
   });
 
@@ -102,10 +90,14 @@ export function createApp(options?: {
       logger.warn('map_validation_failed', { issues: parse.error.issues });
       return res.status(400).json({ error: 'invalid_request', details: parse.error.issues });
     }
-    const result = domEngine.mapDocument(parse.data);
-    metrics.mapped += 1;
-    logger.info('dom_mapped', { url: parse.data.url, confidence: result.confidence });
-    return res.json(result);
+    try {
+      const result = domEngine.mapDocument(parse.data);
+      logger.info('dom_mapped', { url: parse.data.url, confidence: result.confidence });
+      return res.json(result);
+    } catch (error) {
+      logger.error('dom_map_failed', { url: parse.data.url, error: (error as Error).message });
+      return res.status(500).json({ error: 'map_failed', message: (error as Error).message });
+    }
   });
 
   app.post('/actions/fill', (req, res) => {
@@ -114,10 +106,18 @@ export function createApp(options?: {
       logger.warn('fill_validation_failed', { issues: parse.error.issues });
       return res.status(400).json({ error: 'invalid_request', details: parse.error.issues });
     }
-    const result = domEngine.performFill(parse.data);
-    metrics.filled += 1;
-    logger.info('fill_applied', { visitId: parse.data.visitId, applied: result.applied.length });
-    return res.json(result);
+    try {
+      const result = domEngine.performFill(parse.data);
+      logger.info('fill_applied', { visitId: parse.data.visitId, applied: result.applied.length, failed: result.failed.length });
+      return res.json(result);
+    } catch (error) {
+      logger.error('fill_failed', {
+        visitId: parse.data.visitId,
+        error: (error as Error).message,
+        values: Object.keys(parse.data.values)
+      });
+      return res.status(500).json({ error: 'fill_failed', message: (error as Error).message });
+    }
   });
 
   app.post('/actions/undo', (req, res) => {
@@ -126,10 +126,14 @@ export function createApp(options?: {
       logger.warn('undo_validation_failed', { issues: parse.error.issues });
       return res.status(400).json({ error: 'invalid_request', details: parse.error.issues });
     }
-    const result = domEngine.undoLast(parse.data);
-    metrics.undone += 1;
-    logger.info('undo_applied', { visitId: parse.data.visitId, count: result.undone.length });
-    return res.json(result);
+    try {
+      const result = domEngine.undoLast(parse.data);
+      logger.info('undo_applied', { visitId: parse.data.visitId, count: result.undone.length });
+      return res.json(result);
+    } catch (error) {
+      logger.error('undo_failed', { visitId: parse.data.visitId, error: (error as Error).message });
+      return res.status(500).json({ error: 'undo_failed', message: (error as Error).message });
+    }
   });
 
   app.post('/assist/summary', async (req, res) => {
