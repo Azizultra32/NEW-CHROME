@@ -212,4 +212,32 @@ test.describe('Extension smoke (MV3)', () => {
     const v = await web.evaluate(() => (document.querySelector('#e2eFallback') as HTMLTextAreaElement)?.value || '');
     expect(v.length).toBeGreaterThan(0);
   });
+
+  test('verify failure surfaces remap CTA', async () => {
+    const web = await context.newPage();
+    await web.goto('https://example.com');
+
+    const panel = await context.newPage();
+    await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+    await panel.waitForLoadState('domcontentloaded');
+
+    await panel.evaluate(() => new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage({
+        type: 'MAP_PICK',
+        section: 'PLAN',
+        selector: '#missingPlan',
+        framePath: [],
+        href: location.href,
+        title: document.title,
+        isPopup: false
+      }, () => resolve());
+    }));
+
+    await panel.getByRole('button', { name: 'Insert Plan' }).click();
+    await expect(panel.getByText('PLAN field missing or not editable')).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Remap now' })).toBeVisible();
+
+    await panel.close();
+    await web.close();
+  });
 });
