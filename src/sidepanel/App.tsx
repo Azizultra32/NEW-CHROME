@@ -100,12 +100,13 @@ function AppInner() {
   // Wake word state
   const [wakeWordState, setWakeWordState] = useState<RecordingState>(RecordingState.IDLE);
 
-  const defaultTemplates: Record<Section, string> = {
+  const defaultTemplates: Record<Section, string> = useMemo(() => ({
     PLAN: `Plan:\n- Medications: \n- Labs/Imaging: \n- Referrals: \n- Follow-up: \n`,
     HPI: `Chief Complaint: \nHistory of Present Illness: \n`,
     ROS: `Review of Systems: Negative except as noted above.`,
     EXAM: `Physical Exam:\n- General: \n- HEENT: \n- Heart: \n- Lungs: \n- Abdomen: \n- Extremities: \n- Neuro: \n`
-  };
+  }), []);
+  const [templates, setTemplates] = useState<Record<Section, string>>(() => ({ ...defaultTemplates }));
 
   // Feature flags to mitigate risk and allow quick disable
   const [features, setFeatures] = useState({ templates: true, undo: true, multi: true, preview: false, autoBackup: true, tplPerHost: true });
@@ -451,13 +452,24 @@ function AppInner() {
           keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
         }
         const bag = await chrome.storage.local.get(keys);
-        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
-        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
-        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
-      } catch {}
+        const resolve = (section: Section) => {
+          const scoped = features.tplPerHost && host ? bag[`TPL_${host}_${section}`] : undefined;
+          if (typeof scoped === 'string' && scoped.trim()) return scoped;
+          const global = bag[`TPL_${section}`];
+          if (typeof global === 'string' && global.trim()) return global;
+          return defaultTemplates[section];
+        };
+        setTemplates({
+          PLAN: resolve('PLAN'),
+          HPI: resolve('HPI'),
+          ROS: resolve('ROS'),
+          EXAM: resolve('EXAM')
+        });
+      } catch {
+        setTemplates({ ...defaultTemplates });
+      }
     })();
-  }, [features.tplPerHost, host]);
+  }, [defaultTemplates, features.tplPerHost, host]);
 
   function sendInsert(text: string) {
     chrome.tabs
@@ -1062,7 +1074,7 @@ function AppInner() {
   }
 
   async function onInsertTemplate(section: Section) {
-    const payload = defaultTemplates[section] || '(template)';
+    const payload = templates[section] || '(template)';
     await onInsert(section, { payloadOverride: payload });
   }
 
@@ -1731,13 +1743,13 @@ function AppInner() {
   }, [activateMapMode]);
 
   const editTemplate = useCallback(async (section: Section) => {
-    const cur = defaultTemplates[section];
+    const cur = templates[section] || defaultTemplates[section];
     const next = window.prompt(`Edit ${section} template`, cur);
     if (next === null) return false;
     try {
       const key = (features.tplPerHost && host) ? `TPL_${host}_${section}` : `TPL_${section}`;
       await chrome.storage.local.set({ [key]: next });
-      (defaultTemplates as any)[section] = next;
+      setTemplates((prev) => ({ ...prev, [section]: next }));
       toast.push(`${section} template saved`);
       scheduleBackup();
       telemetry.recordEvent('template_saved', { section, host: features.tplPerHost ? host || '(global)' : 'global' }).catch(() => {});
@@ -2661,10 +2673,19 @@ ${section.join(' ')}`;
                         const keys = ['TPL_PLAN','TPL_HPI','TPL_ROS','TPL_EXAM'];
                         if (features.tplPerHost && host) keys.push(`TPL_${host}_PLAN`, `TPL_${host}_HPI`, `TPL_${host}_ROS`, `TPL_${host}_EXAM`);
                         const bag = await chrome.storage.local.get(keys);
-                        (defaultTemplates as any).PLAN = (features.tplPerHost && host && bag[`TPL_${host}_PLAN`]) || bag.TPL_PLAN || (defaultTemplates as any).PLAN;
-                        (defaultTemplates as any).HPI  = (features.tplPerHost && host && bag[`TPL_${host}_HPI`])  || bag.TPL_HPI || (defaultTemplates as any).HPI;
-                        (defaultTemplates as any).ROS  = (features.tplPerHost && host && bag[`TPL_${host}_ROS`])  || bag.TPL_ROS || (defaultTemplates as any).ROS;
-                        (defaultTemplates as any).EXAM = (features.tplPerHost && host && bag[`TPL_${host}_EXAM`]) || bag.TPL_EXAM || (defaultTemplates as any).EXAM;
+                        const resolve = (section: Section) => {
+                          const scoped = features.tplPerHost && host ? bag[`TPL_${host}_${section}`] : undefined;
+                          if (typeof scoped === 'string' && scoped.trim()) return scoped;
+                          const global = bag[`TPL_${section}`];
+                          if (typeof global === 'string' && global.trim()) return global;
+                          return defaultTemplates[section];
+                        };
+                        setTemplates({
+                          PLAN: resolve('PLAN'),
+                          HPI: resolve('HPI'),
+                          ROS: resolve('ROS'),
+                          EXAM: resolve('EXAM')
+                        });
                         const scope = features.tplPerHost ? (host || 'global default') : 'all hosts';
                         toast.push(`Templates loaded (${scope})`);
                       } catch { toast.push('Load failed'); }
