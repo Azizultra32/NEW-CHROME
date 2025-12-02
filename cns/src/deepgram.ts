@@ -1,5 +1,6 @@
 import { defaultLogger } from './logger.js';
-import { DeepgramChunk, EnrichedChunk, Logger, SessionMetadata, StorageClient } from './types.js';
+import { resolveSessionIdentifiers } from './session.js';
+import { ConsentManager, DeepgramChunk, EnrichedChunk, Logger, SessionMetadata, StorageClient } from './types.js';
 
 function mapSpeakerRole(chunk: DeepgramChunk, session: SessionMetadata): { role: EnrichedChunk['role']; alerts: string[] } {
   const alerts: string[] = [];
@@ -46,6 +47,7 @@ async function persistWithRetry(
   while (attempt <= retries) {
     try {
       await storage.insertTranscriptChunk(chunk);
+      logger.info('persist_chunk_success', { sessionId: chunk.sessionId, visitId: chunk.visitId, chunkId: chunk.id });
       return true;
     } catch (error) {
       lastError = error;
@@ -62,11 +64,13 @@ export async function processDeepgramChunk(params: {
   session: SessionMetadata;
   storage: StorageClient;
   broadcast: (chunk: EnrichedChunk) => void | Promise<void>;
+  consentManager?: ConsentManager;
   logger?: Logger;
   retries?: number;
 }): Promise<{ enriched: EnrichedChunk; persisted: boolean }> {
   const logger = params.logger || defaultLogger;
-  const enriched = enrichChunk(params.chunk, params.session);
+  const hydratedSession = await resolveSessionIdentifiers(params.session, params.storage, logger);
+  const enriched = enrichChunk(params.chunk, hydratedSession);
 
   const persisted = await persistWithRetry(params.storage, enriched, logger, params.retries ?? 2);
   if (!persisted) {
@@ -74,5 +78,8 @@ export async function processDeepgramChunk(params: {
   }
 
   await Promise.resolve(params.broadcast(enriched));
+  if (params.consentManager) {
+    await Promise.resolve(params.consentManager.handleChunk(enriched));
+  }
   return { enriched, persisted };
 }

@@ -52,6 +52,10 @@ export interface Logger {
   error(message: string | Error, meta?: Record<string, unknown>): void;
 }
 
+export interface ConsentManager {
+  handleChunk(chunk: EnrichedChunk): Promise<void> | void;
+}
+
 export interface DomMapRequest {
   url: string;
   fields: string[];
